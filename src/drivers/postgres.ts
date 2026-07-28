@@ -1,4 +1,4 @@
-import { parseBrowser, parseDevice, maskIp, getPublicConfig } from '../storage.js';
+import { parseBrowser, parseDevice, maskIp, extractUtmParams, getPublicConfig } from '../storage.js';
 import {
   Driver,
   TrackEvent,
@@ -31,12 +31,22 @@ CREATE TABLE IF NOT EXISTS events (
   country     TEXT,
   browser     TEXT,
   device_type TEXT,
-  timestamp   TEXT NOT NULL
+  timestamp   TEXT NOT NULL,
+  utm_source   TEXT,
+  utm_medium   TEXT,
+  utm_campaign TEXT,
+  utm_term     TEXT,
+  utm_content  TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_evt_ts  ON events(timestamp);
-CREATE INDEX IF NOT EXISTS idx_evt_uid ON events(user_id);
-CREATE INDEX IF NOT EXISTS idx_evt_sid ON events(session_id);
-CREATE INDEX IF NOT EXISTS idx_evt_typ ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_evt_ts      ON events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_evt_uid     ON events(user_id);
+CREATE INDEX IF NOT EXISTS idx_evt_sid     ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_evt_typ     ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_evt_utm_src ON events(utm_source);
+CREATE INDEX IF NOT EXISTS idx_evt_utm_med ON events(utm_medium);
+CREATE INDEX IF NOT EXISTS idx_evt_utm_cmp ON events(utm_campaign);
+CREATE INDEX IF NOT EXISTS idx_evt_utm_trm ON events(utm_term);
+CREATE INDEX IF NOT EXISTS idx_evt_utm_cnt ON events(utm_content);
 
 CREATE TABLE IF NOT EXISTS sessions (
   id           TEXT PRIMARY KEY,
@@ -94,6 +104,10 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
   
   await pool.query(PG_SCHEMA);
 
+  for (const col of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content']) {
+    try { await pool.query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS ${col} TEXT`); } catch {}
+  }
+
   const cutoffDays = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
   const sinceDefault = () => cutoffDays(30);
 
@@ -102,13 +116,20 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
       const browser = parseBrowser(ev.ua || '');
       const device_type = parseDevice(ev.ua || '');
       const maskedIp = maskIp(ev.ip);
+      const utm = extractUtmParams(ev.url);
+      const utm_source = ev.utm_source || utm.utm_source || null;
+      const utm_medium = ev.utm_medium || utm.utm_medium || null;
+      const utm_campaign = ev.utm_campaign || utm.utm_campaign || null;
+      const utm_term = ev.utm_term || utm.utm_term || null;
+      const utm_content = ev.utm_content || utm.utm_content || null;
       
       await pool.query(
-        `INSERT INTO events(event_type,session_id,user_id,url,referrer,properties,ip,ua,country,browser,device_type,timestamp)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        `INSERT INTO events(event_type,session_id,user_id,url,referrer,properties,ip,ua,country,browser,device_type,timestamp,utm_source,utm_medium,utm_campaign,utm_term,utm_content)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
         [ev.event_type, ev.session_id, ev.user_id, ev.url, ev.referrer,
          ev.properties || {}, maskedIp, ev.ua, ev.country,
-         browser, device_type, ev.timestamp]
+         browser, device_type, ev.timestamp,
+         utm_source, utm_medium, utm_campaign, utm_term, utm_content]
       );
 
       if (ev.session_id) {

@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { isbot } from 'isbot';
 import { getPublicConfig } from './storage.js';
 import { Driver, MarpleConfig, TrackEvent, FunnelStep } from './types.js';
 
@@ -50,6 +51,12 @@ async function handleCollect(req: any, res: any, storage: Driver): Promise<void>
       return res.end('Too Many Requests');
     }
 
+    const ua = req.headers['user-agent'] || '';
+    if (isbot(ua)) {
+      res.writeHead(204);
+      return res.end();
+    }
+
     const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KB
     let body = '';
     await new Promise<void>((resolve) => {
@@ -74,7 +81,6 @@ async function handleCollect(req: any, res: any, storage: Driver): Promise<void>
       res.end('Too many events in batch');
       return;
     }
-    const ua = req.headers['user-agent'] || '';
 
     for (const ev of events) {
       if (!ev.event_type) continue;

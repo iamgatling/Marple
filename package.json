@@ -37,12 +37,16 @@
     "start": "node dist/cli.js",
     "test": "node --input-type=module -e \"console.log('no tests')\""
   },
+  "dependencies": {
+    "isbot": "^5.2.1"
+  },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^20.11.0",
     "@types/pg": "^8.11.0",
     "@types/sqlite3": "^3.1.11",
     "express": "^5.2.1",
+    "sqlite3": "^6.0.1",
     "typescript": "^5.3.3"
   },
   "peerDependencies": {

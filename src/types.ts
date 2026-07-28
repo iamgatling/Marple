@@ -9,6 +9,11 @@ export interface TrackEvent {
   ua?: string | null;
   country?: string | null;
   timestamp?: string;
+  utm_source?: string | null;
+  utm_medium?: string | null;
+  utm_campaign?: string | null;
+  utm_term?: string | null;
+  utm_content?: string | null;
   [key: string]: any;
 }
 
