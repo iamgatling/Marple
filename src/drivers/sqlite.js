@@ -1,7 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { createRequire } from 'module';
-import { parseBrowser, parseDevice, maskIp } from '../storage.js';
+import { parseBrowser, parseDevice, maskIp, getPublicConfig } from '../storage.js';
 
 const require = createRequire(import.meta.url);
 
@@ -236,6 +236,10 @@ export default async function openSqliteStorage(config) {
       await dbRun(db, `DELETE FROM events WHERE timestamp<?`, [cutoff]);
       const rollupCutoff = cutoffDays(cfg?.keepRollupsDays || 365);
       await dbRun(db, `DELETE FROM aggregated_metrics WHERE date<?`, [rollupCutoff]);
+    },
+
+    getPublicConfig() {
+      return getPublicConfig(config);
     },
 
     config

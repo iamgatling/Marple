@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { getPublicConfig } from './storage.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -58,7 +59,7 @@ async function handleApi(subPath, req, res, storage) {
     if (subPath === '/users')       return send(await storage.getUsers({ limit: +params.limit || 50, offset: +params.offset || 0 }));
     if (subPath === '/cohorts')     return send(await storage.getCohorts());
     if (subPath === '/events')      return send(await storage.getEvents({ since: params.since }));
-    if (subPath === '/config')      return send(storage.config);
+    if (subPath === '/config')      return send(typeof storage.getPublicConfig === 'function' ? await storage.getPublicConfig() : getPublicConfig(storage.config || {}));
 
     if (subPath.startsWith('/users/')) {
       const userId = decodeURIComponent(subPath.slice('/users/'.length));

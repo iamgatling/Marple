@@ -1,4 +1,4 @@
-import { parseBrowser, parseDevice, maskIp } from '../storage.js';
+import { parseBrowser, parseDevice, maskIp, getPublicConfig } from '../storage.js';
 
 function tryParse(str) {
   try { return JSON.parse(str); } catch { return {}; }
@@ -292,6 +292,10 @@ export default async function openPostgresStorage(config) {
       await pool.query(`DELETE FROM events WHERE timestamp<$1`, [cutoff]);
       const rollupCutoff = cutoffDays(cfg?.keepRollupsDays || 365);
       await pool.query(`DELETE FROM aggregated_metrics WHERE date<$1`, [rollupCutoff]);
+    },
+
+    getPublicConfig() {
+      return getPublicConfig(config);
     },
 
     config
