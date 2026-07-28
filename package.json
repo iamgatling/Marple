@@ -1,7 +1,7 @@
 {
   "name": "marple",
   "version": "1.0.0",
-  "description": "Self-hosted app observability and analytics engine.",
+  "description": "Self-hosted analytics package",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -13,9 +13,16 @@
   },
   "files": [
     "src",
-    "README.md",
-    "marple.config.js"
+    "README.md"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iamgatling/Marple.git"
+  },
+  "homepage": "https://github.com/iamgatling/Marple#readme",
+  "bugs": {
+    "url": "https://github.com/iamgatling/Marple/issues"
+  },
   "sideEffects": false,
   "scripts": {
     "start": "node src/cli.js",

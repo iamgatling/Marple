@@ -1,6 +1,6 @@
 # Marple
 
-Marple is a Self-hosted analytics package for JavaScript applications.
+Marple is a self-hosted analytics package for JavaScript applications.
 
 ## Features
 
