@@ -6,8 +6,49 @@ import { getPublicConfig } from './storage.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 
+const collectRateLimitMap = new Map();
+const COLLECT_RATE_LIMIT_MAX = 100;
+const COLLECT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const windowStart = now - COLLECT_RATE_LIMIT_WINDOW_MS;
+
+  let timestamps = collectRateLimitMap.get(ip);
+  if (!timestamps) {
+    timestamps = [];
+  } else {
+    while (timestamps.length > 0 && timestamps[0] <= windowStart) {
+      timestamps.shift();
+    }
+  }
+
+  if (timestamps.length >= COLLECT_RATE_LIMIT_MAX) {
+    return true;
+  }
+
+  timestamps.push(now);
+  collectRateLimitMap.set(ip, timestamps);
+
+  if (collectRateLimitMap.size > 1000) {
+    for (const [k, ts] of collectRateLimitMap.entries()) {
+      if (ts.length === 0 || ts[ts.length - 1] <= windowStart) {
+        collectRateLimitMap.delete(k);
+      }
+    }
+  }
+
+  return false;
+}
+
 async function handleCollect(req, res, storage) {
   try {
+    const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
+    if (checkRateLimit(ip)) {
+      res.writeHead(429, { 'Content-Type': 'text/plain' });
+      return res.end('Too Many Requests');
+    }
+
     const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KB
     let body = '';
     await new Promise((resolve) => {
@@ -31,7 +72,6 @@ async function handleCollect(req, res, storage) {
       return res.writeHead(400), res.end('Too many events in batch');
     }
     const ua = req.headers['user-agent'] || '';
-    const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
 
     for (const ev of events) {
       if (!ev.event_type) continue;
