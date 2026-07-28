@@ -1,4 +1,6 @@
-export function parseBrowser(ua = '') {
+import { Driver, MarpleConfig } from './types.js';
+
+export function parseBrowser(ua: string = ''): string {
   if (!ua) return 'Unknown';
   if (ua.includes('Edg/')) return 'Edge';
   if (ua.includes('OPR/') || ua.includes('Opera')) return 'Opera';
@@ -8,14 +10,14 @@ export function parseBrowser(ua = '') {
   return 'Other';
 }
 
-export function parseDevice(ua = '') {
+export function parseDevice(ua: string = ''): string {
   if (!ua) return 'Unknown';
   if (/iPad/i.test(ua)) return 'Tablet';
   if (/Mobi|Android|iPhone/i.test(ua)) return 'Mobile';
   return 'Desktop';
 }
 
-export function maskIp(ip) {
+export function maskIp(ip?: string | null): string | null {
   if (!ip) return null;
   if (ip.includes('.')) {
     const p = ip.split('.');
@@ -28,7 +30,7 @@ export function maskIp(ip) {
   return ip;
 }
 
-export function getPublicConfig(config = {}) {
+export function getPublicConfig(config: Record<string, any> = {}): Record<string, any> {
   if (!config || typeof config !== 'object') return {};
 
   const SENSITIVE_KEYS = new Set([
@@ -48,7 +50,7 @@ export function getPublicConfig(config = {}) {
     'auth'
   ]);
 
-  function isSensitiveKey(key) {
+  function isSensitiveKey(key: string): boolean {
     const lowerKey = key.toLowerCase();
     if (SENSITIVE_KEYS.has(lowerKey)) return true;
     if (lowerKey.includes('connectionstring') || lowerKey.includes('connection_string')) return true;
@@ -60,12 +62,12 @@ export function getPublicConfig(config = {}) {
     return false;
   }
 
-  function clean(obj) {
+  function clean(obj: any): any {
     if (Array.isArray(obj)) {
       return obj.map(clean);
     }
     if (obj && typeof obj === 'object' && obj.constructor === Object) {
-      const result = {};
+      const result: Record<string, any> = {};
       for (const [k, v] of Object.entries(obj)) {
         if (!isSensitiveKey(k)) {
           result[k] = clean(v);
@@ -80,30 +82,24 @@ export function getPublicConfig(config = {}) {
 }
 
 /**
- * Unified Driver Interface Contract expects drivers to return:
- * writeEvent(ev)
- * getOverview({ since })
- * getUsers({ limit, offset })
- * getUserProfile(userId)
- * getCohorts()
- * getEvents({ since })
- * getFunnel(steps)
- * runRollup(config)
- * getPublicConfig()
+ * Unified Driver Interface Contract expects drivers to return a Driver object.
  */
-export async function openStorage(config) {
-  // Branch A: Custom Direct Object (map It yourslf )
-  if (config.storage && typeof config.storage === 'object' && typeof config.storage.writeEvent === 'function') {
-    if (typeof config.storage.getPublicConfig !== 'function') {
-      config.storage.getPublicConfig = function() {
-        return getPublicConfig(config.storage.config || config);
+export async function openStorage(config: MarpleConfig): Promise<Driver> {
+  // Branch A: Custom Direct Object
+  if (config.storage && typeof config.storage === 'object' && typeof (config.storage as any).writeEvent === 'function') {
+    const customDriver = config.storage as Driver;
+    if (typeof customDriver.getPublicConfig !== 'function') {
+      customDriver.getPublicConfig = function() {
+        return getPublicConfig(customDriver.config || config);
       };
     }
-    return config.storage;
+    return customDriver;
   }
 
   // Branch B: config object with type or string
-  const storageType = typeof config.storage === 'string' ? config.storage : (config.storage?.type || 'sqlite');
+  const storageType = typeof config.storage === 'string'
+    ? config.storage
+    : (typeof config.storage === 'object' && (config.storage as any)?.type ? (config.storage as any).type : 'sqlite');
 
   if (storageType === 'postgres') {
     const { default: openPostgresStorage } = await import('./drivers/postgres.js');
@@ -117,4 +113,3 @@ export async function openStorage(config) {
 
   throw new Error(`[Marple] Unsupported storage type: ${storageType}`);
 }
-

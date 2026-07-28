@@ -1,6 +1,19 @@
 import { parseBrowser, parseDevice, maskIp, getPublicConfig } from '../storage.js';
+import {
+  Driver,
+  TrackEvent,
+  OverviewOptions,
+  OverviewData,
+  UsersOptions,
+  UsersData,
+  UserProfileData,
+  FunnelStep,
+  FunnelStepResult,
+  RollupConfig,
+  MarpleConfig
+} from '../types.js';
 
-function tryParse(str) {
+function tryParse(str: string): Record<string, any> {
   try { return JSON.parse(str); } catch { return {}; }
 }
 
@@ -63,8 +76,8 @@ CREATE TABLE IF NOT EXISTS aggregated_metrics (
 CREATE INDEX IF NOT EXISTS idx_agg_date ON aggregated_metrics(date);
 `;
 
-export default async function openPostgresStorage(config) {
-  let pg;
+export default async function openPostgresStorage(config: MarpleConfig): Promise<Driver> {
+  let pg: any;
   try {
     const pgModule = await import('pg');
     pg = pgModule.default || pgModule;
@@ -81,13 +94,13 @@ export default async function openPostgresStorage(config) {
   
   await pool.query(PG_SCHEMA);
 
-  const cutoffDays = (days) => new Date(Date.now() - days * 86400000).toISOString();
+  const cutoffDays = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
   const sinceDefault = () => cutoffDays(30);
 
-  const storageObj = {
-    async writeEvent(ev) {
-      const browser = parseBrowser(ev.ua);
-      const device_type = parseDevice(ev.ua);
+  const storageObj: Driver = {
+    async writeEvent(ev: TrackEvent): Promise<void> {
+      const browser = parseBrowser(ev.ua || '');
+      const device_type = parseDevice(ev.ua || '');
       const maskedIp = maskIp(ev.ip);
       
       await pool.query(
@@ -118,7 +131,7 @@ export default async function openPostgresStorage(config) {
       }
     },
 
-    async getOverview({ since } = {}) {
+    async getOverview({ since }: OverviewOptions = {}): Promise<OverviewData> {
       const cutoff = since || sinceDefault();
       const fiveMinsAgo = new Date(Date.now() - 5 * 60000).toISOString();
       const [totalsRes, activeRes, topPagesRes, topReferrersRes, browsersRes, devicesRes, countriesRes, dailyViewsRes] = await Promise.all([
@@ -136,20 +149,20 @@ export default async function openPostgresStorage(config) {
       const active = activeRes.rows[0];
 
       return {
-        totalEvents: parseInt(totals?.te || 0, 10),
-        uniqueSessions: parseInt(totals?.us || 0, 10),
-        uniqueUsers: parseInt(totals?.uu || 0, 10),
-        activeNow: parseInt(active?.n || 0, 10),
-        topPages: topPagesRes.rows.map(r => ({ ...r, views: parseInt(r.views, 10) })),
-        topReferrers: topReferrersRes.rows.map(r => ({ ...r, count: parseInt(r.count, 10) })),
-        browsers: browsersRes.rows.map(r => ({ ...r, count: parseInt(r.count, 10) })),
-        devices: devicesRes.rows.map(r => ({ ...r, count: parseInt(r.count, 10) })),
-        countries: countriesRes.rows.map(r => ({ ...r, count: parseInt(r.count, 10) })),
-        dailyViews: dailyViewsRes.rows.map(r => ({ ...r, views: parseInt(r.views, 10) }))
+        totalEvents: parseInt(totals?.te || '0', 10),
+        uniqueSessions: parseInt(totals?.us || '0', 10),
+        uniqueUsers: parseInt(totals?.uu || '0', 10),
+        activeNow: parseInt(active?.n || '0', 10),
+        topPages: topPagesRes.rows.map((r: any) => ({ ...r, views: parseInt(r.views, 10) })),
+        topReferrers: topReferrersRes.rows.map((r: any) => ({ ...r, count: parseInt(r.count, 10) })),
+        browsers: browsersRes.rows.map((r: any) => ({ ...r, count: parseInt(r.count, 10) })),
+        devices: devicesRes.rows.map((r: any) => ({ ...r, count: parseInt(r.count, 10) })),
+        countries: countriesRes.rows.map((r: any) => ({ ...r, count: parseInt(r.count, 10) })),
+        dailyViews: dailyViewsRes.rows.map((r: any) => ({ ...r, views: parseInt(r.views, 10) }))
       };
     },
 
-    async getUsers({ limit = 50, offset = 0 } = {}) {
+    async getUsers({ limit = 50, offset = 0 }: UsersOptions = {}): Promise<UsersData> {
       const usersRes = await pool.query(
         `SELECT u.id, u.first_seen, u.last_seen, u.country, u.browser, u.device_type, COUNT(e.id) as event_count
          FROM users u LEFT JOIN events e ON e.user_id=u.id GROUP BY u.id ORDER BY u.last_seen DESC LIMIT $1 OFFSET $2`,
@@ -157,12 +170,12 @@ export default async function openPostgresStorage(config) {
       );
       const totalRes = await pool.query(`SELECT COUNT(*) as n FROM users`);
       return {
-        users: usersRes.rows.map(r => ({ ...r, event_count: parseInt(r.event_count, 10) })),
-        total: parseInt(totalRes.rows[0]?.n || 0, 10)
+        users: usersRes.rows.map((r: any) => ({ ...r, event_count: parseInt(r.event_count, 10) })),
+        total: parseInt(totalRes.rows[0]?.n || '0', 10)
       };
     },
 
-    async getUserProfile(userId) {
+    async getUserProfile(userId: string): Promise<UserProfileData | null> {
       const userRes = await pool.query(`SELECT * FROM users WHERE id=$1`, [userId]);
       if (userRes.rowCount === 0) return null;
       const eventsRes = await pool.query(
@@ -171,14 +184,14 @@ export default async function openPostgresStorage(config) {
       );
       return {
         user: userRes.rows[0],
-        events: eventsRes.rows.map(e => ({
+        events: eventsRes.rows.map((e: any) => ({
           ...e,
           properties: typeof e.properties === 'string' ? tryParse(e.properties) : (e.properties || {})
         }))
       };
     },
 
-    async getCohorts() {
+    async getCohorts(): Promise<any[]> {
       const res = await pool.query(`
         WITH base AS (
           SELECT id, TO_CHAR(first_seen::timestamp, 'IYYY-"W"IW') as cohort_week, first_seen FROM users
@@ -195,14 +208,14 @@ export default async function openPostgresStorage(config) {
           week_num, COUNT(DISTINCT id) as retained
         FROM act GROUP BY cohort_week, week_num ORDER BY cohort_week DESC, week_num ASC
       `);
-      return res.rows.map(r => ({
+      return res.rows.map((r: any) => ({
         ...r,
         cohort_size: parseInt(r.cohort_size, 10),
         retained: parseInt(r.retained, 10)
       }));
     },
 
-    async getEvents({ since } = {}) {
+    async getEvents({ since }: OverviewOptions = {}): Promise<any> {
       const cutoff = since || sinceDefault();
       const prev = new Date(Date.now() - 60 * 86400000).toISOString();
       const [eventsRes, prevEventsRes, trendRes] = await Promise.all([
@@ -211,27 +224,27 @@ export default async function openPostgresStorage(config) {
         pool.query(`SELECT event_type, TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD') as date, COUNT(*) as count FROM events WHERE timestamp>=$1 AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [cutoff])
       ]);
       
-      const prevMap = Object.fromEntries(prevEventsRes.rows.map(e => [e.event_type, parseInt(e.count, 10)]));
+      const prevMap = Object.fromEntries(prevEventsRes.rows.map((e: any) => [e.event_type, parseInt(e.count, 10)]));
       return {
-        events: eventsRes.rows.map(e => ({
+        events: eventsRes.rows.map((e: any) => ({
           ...e,
           count: parseInt(e.count, 10),
           unique_users: parseInt(e.unique_users, 10),
           prev_count: prevMap[e.event_type] || 0
         })),
-        trend: trendRes.rows.map(e => ({ ...e, count: parseInt(e.count, 10) }))
+        trend: trendRes.rows.map((e: any) => ({ ...e, count: parseInt(e.count, 10) }))
       };
     },
 
-    async getFunnel(steps) {
+    async getFunnel(steps: FunnelStep[]): Promise<FunnelStepResult[]> {
       if (!steps || steps.length < 2) return [];
-      const results = [];
-      let prevCount = null;
+      const results: FunnelStepResult[] = [];
+      let prevCount: number | null = null;
       let sessionFilter = '';
-      let filterParams = [];
+      let filterParams: string[] = [];
 
       for (const step of steps) {
-        let count;
+        let count: number;
         const currentParamIdx = filterParams.length + 1;
         
         if (sessionFilter === '') {
@@ -239,7 +252,7 @@ export default async function openPostgresStorage(config) {
             ? `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type='pageview' AND url LIKE $${currentParamIdx}`
             : `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type=$${currentParamIdx}`;
           const row = await pool.query(queryStr, step.type === 'pageview' ? [`%${step.value}%`] : [step.value]);
-          count = parseInt(row.rows[0]?.count || 0, 10);
+          count = parseInt(row.rows[0]?.count || '0', 10);
         } else {
           const queryStr = step.type === 'pageview'
             ? `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type='pageview' AND url LIKE $${currentParamIdx} AND session_id IN (${sessionFilter})`
@@ -247,7 +260,7 @@ export default async function openPostgresStorage(config) {
           
           const params = [...filterParams, step.type === 'pageview' ? `%${step.value}%` : step.value];
           const row = await pool.query(queryStr, params);
-          count = parseInt(row.rows[0]?.count || 0, 10);
+          count = parseInt(row.rows[0]?.count || '0', 10);
         }
         
         results.push({ step: step.label || step.value, count, dropoff: prevCount !== null ? Math.round((1 - count / (prevCount || 1)) * 100) : 0 });
@@ -268,7 +281,7 @@ export default async function openPostgresStorage(config) {
       return results;
     },
 
-    async runRollup(cfg) {
+    async runRollup(cfg?: RollupConfig): Promise<void> {
       const cutoff = cutoffDays(cfg?.keepRawEventsDays || 30);
       
       await pool.query(
@@ -294,7 +307,7 @@ export default async function openPostgresStorage(config) {
       await pool.query(`DELETE FROM aggregated_metrics WHERE date<$1`, [rollupCutoff]);
     },
 
-    getPublicConfig() {
+    getPublicConfig(): MarpleConfig {
       return getPublicConfig(config);
     },
 

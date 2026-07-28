@@ -3,19 +3,27 @@
  * Batched, non-blocking client-side event collection.
  * Loaded from /marple/client.js
  */
-(function (window) {
+import { TrackEvent } from './types.js';
+
+(function (window: any) {
   'use strict';
 
   const FLUSH_INTERVAL_MS = 10000;
   const MAX_QUEUE = 50;
 
-  let _config = { endpoint: '/marple/collect', sessionId: null, userId: null };
-  const eventQueue = [];
-  let _timer = null;
+  interface ClientConfig {
+    endpoint: string;
+    sessionId: string | null;
+    userId: string | null;
+  }
+
+  let _config: ClientConfig = { endpoint: '/marple/collect', sessionId: null, userId: null };
+  const eventQueue: TrackEvent[] = [];
+  let _timer: any = null;
   let _flushing = false;
 
   // Session ID
-  function getOrCreateSession() {
+  function getOrCreateSession(): string {
     let sid = sessionStorage.getItem('_marple_sid');
     if (!sid) {
       sid = 'sid_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -25,7 +33,7 @@
   }
 
   // Flush
-  function flush(useBeacon) {
+  function flush(useBeacon?: boolean): void {
     if (_flushing || !eventQueue.length) return;
     _flushing = true;
     const events = eventQueue.splice(0);
@@ -40,7 +48,7 @@
   }
 
   // Track
-  function track(eventType, properties) {
+  function track(eventType: string, properties?: Record<string, any>): void {
     eventQueue.push({
       event_type: eventType,
       session_id: _config.sessionId,
@@ -54,15 +62,15 @@
   }
 
   // Auto page-view tracking
-  function trackPageview() {
+  function trackPageview(): void {
     track('pageview', { title: document.title });
   }
 
   // SPA history patching 
-  function patchHistory() {
-    if (history.__marple_patched__) return;
-    history.__marple_patched__ = true;
-    const wrap = (orig) => function (...args) {
+  function patchHistory(): void {
+    if ((history as any).__marple_patched__) return;
+    (history as any).__marple_patched__ = true;
+    const wrap = (orig: any) => function (this: any, ...args: any[]) {
       const result = orig.apply(this, args);
       trackPageview();
       return result;
@@ -72,7 +80,7 @@
   }
 
   // Init 
-  function init(options) {
+  function init(options?: Partial<ClientConfig>): void {
     _config = { ..._config, ...options };
     _config.sessionId = _config.sessionId || getOrCreateSession();
     _config.userId = _config.userId || localStorage.getItem('_marple_uid') || null;
@@ -93,11 +101,11 @@
   }
 
   // Identify
-  function identify(userId, traits) {
+  function identify(userId: string, traits?: Record<string, any>): void {
     _config.userId = userId;
     localStorage.setItem('_marple_uid', userId);
     track('identify', traits || {});
   }
 
   window.Marple = { init, track, identify };
-})(window);
+})(typeof window !== 'undefined' ? window : globalThis);

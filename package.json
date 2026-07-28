@@ -3,15 +3,23 @@
   "version": "1.0.0",
   "description": "Self-hosted analytics package",
   "type": "module",
-  "main": "./src/index.js",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.js",
-    "./client": "./src/client.js"
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./client": {
+      "import": "./dist/client.js",
+      "types": "./dist/client.d.ts"
+    }
   },
   "bin": {
-    "marple": "./src/cli.js"
+    "marple": "./dist/cli.js"
   },
   "files": [
+    "dist",
     "src",
     "README.md"
   ],
@@ -25,11 +33,17 @@
   },
   "sideEffects": false,
   "scripts": {
-    "start": "node src/cli.js",
+    "build": "tsc && cp src/dashboard.html dist/dashboard.html",
+    "start": "node dist/cli.js",
     "test": "node --input-type=module -e \"console.log('no tests')\""
   },
   "devDependencies": {
-    "express": "^5.2.1"
+    "@types/express": "^5.0.0",
+    "@types/node": "^20.11.0",
+    "@types/pg": "^8.11.0",
+    "@types/sqlite3": "^3.1.11",
+    "express": "^5.2.1",
+    "typescript": "^5.3.3"
   },
   "peerDependencies": {
     "pg": "^8.0.0",

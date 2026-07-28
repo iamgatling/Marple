@@ -2,10 +2,23 @@ import fs from 'fs/promises';
 import path from 'path';
 import { createRequire } from 'module';
 import { parseBrowser, parseDevice, maskIp, getPublicConfig } from '../storage.js';
+import {
+  Driver,
+  TrackEvent,
+  OverviewOptions,
+  OverviewData,
+  UsersOptions,
+  UsersData,
+  UserProfileData,
+  FunnelStep,
+  FunnelStepResult,
+  RollupConfig,
+  MarpleConfig
+} from '../types.js';
 
 const require = createRequire(import.meta.url);
 
-function tryParse(str) {
+function tryParse(str: string): Record<string, any> {
   try { return JSON.parse(str); } catch { return {}; }
 }
 
@@ -72,31 +85,31 @@ CREATE TABLE IF NOT EXISTS aggregated_metrics (
 CREATE INDEX IF NOT EXISTS idx_agg_date ON aggregated_metrics(date);
 `;
 
-function dbAll(db, sql, p = []) {
-  return new Promise((res, rej) => db.all(sql, p, (e, r) => e ? rej(e) : res(r || [])));
+function dbAll(db: any, sql: string, p: any[] = []): Promise<any[]> {
+  return new Promise((res, rej) => db.all(sql, p, (e: Error | null, r: any[]) => e ? rej(e) : res(r || [])));
 }
-function dbGet(db, sql, p = []) {
-  return new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r || null)));
+function dbGet(db: any, sql: string, p: any[] = []): Promise<any> {
+  return new Promise((res, rej) => db.get(sql, p, (e: Error | null, r: any) => e ? rej(e) : res(r || null)));
 }
-function dbRun(db, sql, p = []) {
-  return new Promise((res, rej) => db.run(sql, p, function(e) { e ? rej(e) : res(this); }));
+function dbRun(db: any, sql: string, p: any[] = []): Promise<any> {
+  return new Promise((res, rej) => db.run(sql, p, function(this: any, e: Error | null) { e ? rej(e) : res(this); }));
 }
 
-export default async function openSqliteStorage(config) {
+export default async function openSqliteStorage(config: MarpleConfig): Promise<Driver> {
   const sqlite3 = require('sqlite3').verbose();
   const filePath = path.resolve(config.sqlitePath || './marple.sqlite');
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 
   const db = new sqlite3.Database(filePath, sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE);
-  await new Promise((res, rej) => db.exec(SQLITE_SCHEMA, e => e ? rej(e) : res()));
+  await new Promise<void>((res, rej) => db.exec(SQLITE_SCHEMA, (e: Error | null) => e ? rej(e) : res()));
 
-  const cutoffDays = (days) => new Date(Date.now() - days * 86400000).toISOString();
+  const cutoffDays = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
   const sinceDefault = () => cutoffDays(30);
 
-  const storageObj = {
-    async writeEvent(ev) {
-      const browser = parseBrowser(ev.ua);
-      const device_type = parseDevice(ev.ua);
+  const storageObj: Driver = {
+    async writeEvent(ev: TrackEvent): Promise<void> {
+      const browser = parseBrowser(ev.ua || '');
+      const device_type = parseDevice(ev.ua || '');
       const maskedIp = maskIp(ev.ip);
       await dbRun(db,
         `INSERT INTO events(event_type,session_id,user_id,url,referrer,properties,ip,ua,country,browser,device_type,timestamp)
@@ -124,7 +137,7 @@ export default async function openSqliteStorage(config) {
       }
     },
 
-    async getOverview({ since } = {}) {
+    async getOverview({ since }: OverviewOptions = {}): Promise<OverviewData> {
       const cutoff = since || sinceDefault();
       const [totals, active, topPages, topReferrers, browsers, devices, countries, dailyViews] = await Promise.all([
         dbGet(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=?`, [cutoff]),
@@ -143,27 +156,28 @@ export default async function openSqliteStorage(config) {
       };
     },
 
-    async getUsers({ limit = 50, offset = 0 } = {}) {
+    async getUsers({ limit = 50, offset = 0 }: UsersOptions = {}): Promise<UsersData> {
       const users = await dbAll(db,
         `SELECT u.id, u.first_seen, u.last_seen, u.country, u.browser, u.device_type, COUNT(e.id) as event_count
          FROM users u LEFT JOIN events e ON e.user_id=u.id GROUP BY u.id ORDER BY u.last_seen DESC LIMIT ? OFFSET ?`,
         [limit, offset]
       );
-      const total = (await dbGet(db, `SELECT COUNT(*) as n FROM users`))?.n || 0;
+      const totalRow = await dbGet(db, `SELECT COUNT(*) as n FROM users`);
+      const total = totalRow?.n || 0;
       return { users, total };
     },
 
-    async getUserProfile(userId) {
+    async getUserProfile(userId: string): Promise<UserProfileData | null> {
       const user = await dbGet(db, `SELECT * FROM users WHERE id=?`, [userId]);
       if (!user) return null;
       const events = await dbAll(db,
         `SELECT event_type, url, properties, timestamp FROM events WHERE user_id=? ORDER BY timestamp DESC LIMIT 100`,
         [userId]
       );
-      return { user, events: events.map(e => ({ ...e, properties: tryParse(e.properties) })) };
+      return { user, events: events.map((e: any) => ({ ...e, properties: tryParse(e.properties) })) };
     },
 
-    async getCohorts() {
+    async getCohorts(): Promise<any[]> {
       return dbAll(db, `
         WITH base AS (
           SELECT id, strftime('%Y-W%W', first_seen) as cohort_week, first_seen FROM users
@@ -182,7 +196,7 @@ export default async function openSqliteStorage(config) {
       `);
     },
 
-    async getEvents({ since } = {}) {
+    async getEvents({ since }: OverviewOptions = {}): Promise<any> {
       const cutoff = since || sinceDefault();
       const prev = new Date(Date.now() - 60 * 86400000).toISOString();
       const [events, prevEvents, trend] = await Promise.all([
@@ -190,19 +204,19 @@ export default async function openSqliteStorage(config) {
         dbAll(db, `SELECT event_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<? AND event_type!='pageview' GROUP BY event_type`, [prev, cutoff]),
         dbAll(db, `SELECT event_type, substr(timestamp,1,10) as date, COUNT(*) as count FROM events WHERE timestamp>=? AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [cutoff]),
       ]);
-      const prevMap = Object.fromEntries(prevEvents.map(e => [e.event_type, e.count]));
-      return { events: events.map(e => ({ ...e, prev_count: prevMap[e.event_type] || 0 })), trend };
+      const prevMap = Object.fromEntries(prevEvents.map((e: any) => [e.event_type, e.count]));
+      return { events: events.map((e: any) => ({ ...e, prev_count: prevMap[e.event_type] || 0 })), trend };
     },
 
-    async getFunnel(steps) {
+    async getFunnel(steps: FunnelStep[]): Promise<FunnelStepResult[]> {
       if (!steps || steps.length < 2) return [];
-      const results = [];
-      let prevCount = null;
+      const results: FunnelStepResult[] = [];
+      let prevCount: number | null = null;
       let sessionFilter = '';
-      let filterParams = [];
+      let filterParams: string[] = [];
 
       for (const step of steps) {
-        let count;
+        let count: number;
         if (sessionFilter === '') {
           const row = step.type === 'pageview'
             ? await dbGet(db, `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type='pageview' AND url LIKE ?`, [`%${step.value}%`])
@@ -229,7 +243,7 @@ export default async function openSqliteStorage(config) {
       return results;
     },
 
-    async runRollup(cfg) {
+    async runRollup(cfg?: RollupConfig): Promise<void> {
       const cutoff = cutoffDays(cfg?.keepRawEventsDays || 30);
       await dbRun(db, `INSERT OR REPLACE INTO aggregated_metrics(date,metric,dimension,value) SELECT substr(timestamp,1,10),'pageviews',NULL,COUNT(*) FROM events WHERE event_type='pageview' AND timestamp<? GROUP BY substr(timestamp,1,10)`, [cutoff]);
       await dbRun(db, `INSERT OR REPLACE INTO aggregated_metrics(date,metric,dimension,value) SELECT substr(timestamp,1,10),event_type,NULL,COUNT(*) FROM events WHERE event_type!='pageview' AND timestamp<? GROUP BY event_type, substr(timestamp,1,10)`, [cutoff]);
@@ -238,7 +252,7 @@ export default async function openSqliteStorage(config) {
       await dbRun(db, `DELETE FROM aggregated_metrics WHERE date<?`, [rollupCutoff]);
     },
 
-    getPublicConfig() {
+    getPublicConfig(): MarpleConfig {
       return getPublicConfig(config);
     },
 

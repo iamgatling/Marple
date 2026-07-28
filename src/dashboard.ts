@@ -1,16 +1,17 @@
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { getPublicConfig } from './storage.js';
+import { Driver, MarpleConfig, TrackEvent, FunnelStep } from './types.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-
-const collectRateLimitMap = new Map();
+const collectRateLimitMap = new Map<string, number[]>();
 const COLLECT_RATE_LIMIT_MAX = 100;
 const COLLECT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
-function checkRateLimit(ip) {
+function checkRateLimit(ip: string): boolean {
   const now = Date.now();
   const windowStart = now - COLLECT_RATE_LIMIT_WINDOW_MS;
 
@@ -41,7 +42,7 @@ function checkRateLimit(ip) {
   return false;
 }
 
-async function handleCollect(req, res, storage) {
+async function handleCollect(req: any, res: any, storage: Driver): Promise<void> {
   try {
     const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
     if (checkRateLimit(ip)) {
@@ -51,8 +52,8 @@ async function handleCollect(req, res, storage) {
 
     const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KB
     let body = '';
-    await new Promise((resolve) => {
-      req.on('data', chunk => {
+    await new Promise<void>((resolve) => {
+      req.on('data', (chunk: any) => {
         body += chunk;
         if (Buffer.byteLength(body) > MAX_PAYLOAD_BYTES) {
           res.writeHead(413);
@@ -67,9 +68,11 @@ async function handleCollect(req, res, storage) {
 
     const payload = JSON.parse(body || '{}');
     const MAX_EVENTS_PER_BATCH = 50;
-    const events = Array.isArray(payload) ? payload : [payload];
+    const events: TrackEvent[] = Array.isArray(payload) ? payload : [payload];
     if (events.length > MAX_EVENTS_PER_BATCH) {
-      return res.writeHead(400), res.end('Too many events in batch');
+      res.writeHead(400);
+      res.end('Too many events in batch');
+      return;
     }
     const ua = req.headers['user-agent'] || '';
 
@@ -80,14 +83,14 @@ async function handleCollect(req, res, storage) {
 
     res.writeHead(204);
     res.end();
-  } catch (e) {
+  } catch (e: any) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: e.message }));
   }
 }
 
-async function handleApi(subPath, req, res, storage) {
-  const send = (data, status = 200) => {
+async function handleApi(subPath: string, req: any, res: any, storage: Driver): Promise<void> {
+  const send = (data: any, status = 200) => {
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(data));
   };
@@ -97,58 +100,77 @@ async function handleApi(subPath, req, res, storage) {
   try {
     if (subPath === '/overview')    return send(await storage.getOverview({ since: params.since }));
     if (subPath === '/users')       return send(await storage.getUsers({ limit: +params.limit || 50, offset: +params.offset || 0 }));
-    if (subPath === '/cohorts')     return send(await storage.getCohorts());
-    if (subPath === '/events')      return send(await storage.getEvents({ since: params.since }));
+    if (subPath === '/cohorts')     return send(typeof storage.getCohorts === 'function' ? await storage.getCohorts() : []);
+    if (subPath === '/events')      return send(typeof storage.getEvents === 'function' ? await storage.getEvents({ since: params.since }) : { events: [], trend: [] });
     if (subPath === '/config')      return send(typeof storage.getPublicConfig === 'function' ? await storage.getPublicConfig() : getPublicConfig(storage.config || {}));
 
     if (subPath.startsWith('/users/')) {
       const userId = decodeURIComponent(subPath.slice('/users/'.length));
-      const profile = await storage.getUserProfile(userId);
+      const profile = typeof storage.getUserProfile === 'function' ? await storage.getUserProfile(userId) : null;
       return profile ? send(profile) : send({ error: 'Not found' }, 404);
     }
 
     if (subPath === '/funnel') {
       let body = '';
-      await new Promise(r => {
-        req.on('data', c => { body += c; if (body.length > 8192) body = ''; });
+      await new Promise<void>(r => {
+        req.on('data', (c: any) => { body += c; if (body.length > 8192) body = ''; });
         req.on('end', r);
       });
-      const { steps } = JSON.parse(body || '{}');
+      const { steps } = JSON.parse(body || '{}') as { steps: FunnelStep[] };
       return send(await storage.getFunnel(steps));
     }
 
     send({ error: 'Not found' }, 404);
-  } catch (e) {
+  } catch (e: any) {
     send({ error: e.message }, 500);
   }
 }
 
-function getDashboardHTML() {
-  try {
-    return readFileSync(path.join(__dirname, 'dashboard.html'), 'utf8');
-  } catch {
-    return '<h1>Marple dashboard.html not found</h1>';
+function getDashboardHTML(): string {
+  const candidates = [
+    path.join(__dirname, 'dashboard.html'),
+    path.join(__dirname, '../src/dashboard.html'),
+    path.join(process.cwd(), 'src/dashboard.html')
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      try { return readFileSync(p, 'utf8'); } catch { }
+    }
   }
+  return '<h1>Marple dashboard.html not found</h1>';
 }
 
-function getClientSDK() {
-  try {
-    return readFileSync(path.join(__dirname, 'client.js'), 'utf8');
-  } catch {
-    return '/* Marple client.js not found */';
+function getClientSDK(): string {
+  const candidates = [
+    path.join(__dirname, 'client.js'),
+    path.join(__dirname, '../dist/client.js'),
+    path.join(__dirname, '../src/client.js'),
+    path.join(process.cwd(), 'dist/client.js')
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      try { return readFileSync(p, 'utf8'); } catch { }
+    }
   }
+  return '/* Marple client.js not found */';
 }
 
-export function createDashboardMiddleware({ authenticate, storage, config }) {
+export interface DashboardOptions {
+  authenticate: (req: any) => boolean | Promise<boolean>;
+  storage: Driver;
+  config: MarpleConfig;
+}
+
+export function createDashboardMiddleware({ authenticate, storage, config }: DashboardOptions) {
   let dashboardHTML = getDashboardHTML();
   let clientSDK = getClientSDK();
 
-  return async function marpleMiddleware(req, res, next) {
+  return async function marpleMiddleware(req: any, res: any, next?: any) {
     if (config?.dev) {
       dashboardHTML = getDashboardHTML();
       clientSDK = getClientSDK();
     }
-    const rawPath = req.url.split('?')[0].replace(/\/+$/, '') || '/'; //probably unnecessary
+    const rawPath = req.url.split('?')[0].replace(/\/+$/, '') || '/';
 
     if (rawPath === '/client.js' || rawPath.endsWith('/marple/client.js')) {
       res.writeHead(200, { 'Content-Type': 'application/javascript', 'Cache-Control': 'public,max-age=3600' });
