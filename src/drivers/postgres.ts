@@ -1,9 +1,10 @@
-import { parseBrowser, parseDevice, maskIp, extractUtmParams, getPublicConfig } from '../storage.js';
+import { parseBrowser, parseDevice, maskIp, extractUtmParams, getPublicConfig, normalizeDateRange } from '../storage.js';
 import {
   Driver,
   TrackEvent,
   OverviewOptions,
   OverviewData,
+  GoalConversionData,
   UsersOptions,
   UsersData,
   UserProfileData,
@@ -108,9 +109,6 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
     try { await pool.query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS ${col} TEXT`); } catch {}
   }
 
-  const cutoffDays = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
-  const sinceDefault = () => cutoffDays(30);
-
   const storageObj: Driver = {
     async writeEvent(ev: TrackEvent): Promise<void> {
       const browser = parseBrowser(ev.ua || '');
@@ -152,22 +150,38 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
       }
     },
 
-    async getOverview({ since }: OverviewOptions = {}): Promise<OverviewData> {
-      const cutoff = since || sinceDefault();
+    async getOverview(options: OverviewOptions = {}): Promise<OverviewData> {
+      const { since, until, prevSince, prevUntil } = normalizeDateRange(options.since, options.until);
+      const targetGoal = options.goal || options.targetGoal;
       const fiveMinsAgo = new Date(Date.now() - 5 * 60000).toISOString();
-      const [totalsRes, activeRes, topPagesRes, topReferrersRes, browsersRes, devicesRes, countriesRes, dailyViewsRes] = await Promise.all([
-        pool.query(`SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=$1`, [cutoff]),
+
+      const [totalsRes, prevTotalsRes, activeRes, topPagesRes, topReferrersRes, browsersRes, devicesRes, countriesRes, dailyViewsRes, availGoalsRes] = await Promise.all([
+        pool.query(`SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=$1 AND timestamp<=$2`, [since, until]),
+        pool.query(`SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=$1 AND timestamp<$2`, [prevSince, prevUntil]),
         pool.query(`SELECT COUNT(*) as n FROM sessions WHERE last_seen_at >= $1`, [fiveMinsAgo]),
-        pool.query(`SELECT url as page, COUNT(*) as views FROM events WHERE event_type='pageview' AND url IS NOT NULL AND timestamp>=$1 GROUP BY url ORDER BY views DESC LIMIT 10`, [cutoff]),
-        pool.query(`SELECT referrer, COUNT(*) as count FROM events WHERE referrer IS NOT NULL AND referrer!='' AND timestamp>=$1 GROUP BY referrer ORDER BY count DESC LIMIT 10`, [cutoff]),
-        pool.query(`SELECT browser, COUNT(*) as count FROM events WHERE timestamp>=$1 AND browser IS NOT NULL GROUP BY browser ORDER BY count DESC`, [cutoff]),
-        pool.query(`SELECT device_type, COUNT(*) as count FROM events WHERE timestamp>=$1 AND device_type IS NOT NULL GROUP BY device_type ORDER BY count DESC`, [cutoff]),
-        pool.query(`SELECT country, COUNT(*) as count FROM events WHERE timestamp>=$1 AND country IS NOT NULL AND country!='' GROUP BY country ORDER BY count DESC LIMIT 10`, [cutoff]),
-        pool.query(`SELECT TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD') as date, COUNT(*) as views FROM events WHERE event_type='pageview' AND timestamp>=$1 GROUP BY date ORDER BY date ASC`, [cutoff]),
+        pool.query(`SELECT url as page, COUNT(*) as views FROM events WHERE event_type='pageview' AND url IS NOT NULL AND timestamp>=$1 AND timestamp<=$2 GROUP BY url ORDER BY views DESC LIMIT 10`, [since, until]),
+        pool.query(`SELECT referrer, COUNT(*) as count FROM events WHERE referrer IS NOT NULL AND referrer!='' AND timestamp>=$1 AND timestamp<=$2 GROUP BY referrer ORDER BY count DESC LIMIT 10`, [since, until]),
+        pool.query(`SELECT browser, COUNT(*) as count FROM events WHERE timestamp>=$1 AND timestamp<=$2 AND browser IS NOT NULL GROUP BY browser ORDER BY count DESC`, [since, until]),
+        pool.query(`SELECT device_type, COUNT(*) as count FROM events WHERE timestamp>=$1 AND timestamp<=$2 AND device_type IS NOT NULL GROUP BY device_type ORDER BY count DESC`, [since, until]),
+        pool.query(`SELECT country, COUNT(*) as count FROM events WHERE timestamp>=$1 AND timestamp<=$2 AND country IS NOT NULL AND country!='' GROUP BY country ORDER BY count DESC LIMIT 10`, [since, until]),
+        pool.query(`SELECT TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD') as date, COUNT(*) as views FROM events WHERE event_type='pageview' AND timestamp>=$1 AND timestamp<=$2 GROUP BY date ORDER BY date ASC`, [since, until]),
+        pool.query(`SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=$1 AND timestamp<=$2`, [since, until])
       ]);
 
       const totals = totalsRes.rows[0];
+      const prevTotals = prevTotalsRes.rows[0];
       const active = activeRes.rows[0];
+      const availableGoals = availGoalsRes.rows.map((r: any) => r.event_type);
+
+      let conversion: GoalConversionData | null = null;
+      if (targetGoal) {
+        const goalRes = await storageObj.getConversions!({ since: options.since, until: options.until, goal: targetGoal });
+        if (Array.isArray(goalRes)) {
+          conversion = goalRes[0] || null;
+        } else {
+          conversion = goalRes;
+        }
+      }
 
       return {
         totalEvents: parseInt(totals?.te || '0', 10),
@@ -179,8 +193,68 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
         browsers: browsersRes.rows.map((r: any) => ({ ...r, count: parseInt(r.count, 10) })),
         devices: devicesRes.rows.map((r: any) => ({ ...r, count: parseInt(r.count, 10) })),
         countries: countriesRes.rows.map((r: any) => ({ ...r, count: parseInt(r.count, 10) })),
-        dailyViews: dailyViewsRes.rows.map((r: any) => ({ ...r, views: parseInt(r.views, 10) }))
+        dailyViews: dailyViewsRes.rows.map((r: any) => ({ ...r, views: parseInt(r.views, 10) })),
+        previousPeriod: {
+          totalEvents: parseInt(prevTotals?.te || '0', 10),
+          uniqueSessions: parseInt(prevTotals?.us || '0', 10),
+          uniqueUsers: parseInt(prevTotals?.uu || '0', 10)
+        },
+        conversion,
+        availableGoals
       };
+    },
+
+    async getConversions(options: OverviewOptions = {}): Promise<GoalConversionData[] | GoalConversionData | null> {
+      const { since, until, prevSince, prevUntil } = normalizeDateRange(options.since, options.until);
+      const targetGoal = options.goal || options.targetGoal;
+
+      const [totalSessionsRes, prevTotalSessionsRes] = await Promise.all([
+        pool.query(`SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=$1 AND timestamp<=$2`, [since, until]),
+        pool.query(`SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=$1 AND timestamp<$2`, [prevSince, prevUntil])
+      ]);
+      const totalSessions = parseInt(totalSessionsRes.rows[0]?.us || '0', 10) || 1;
+      const prevTotalSessions = parseInt(prevTotalSessionsRes.rows[0]?.us || '0', 10) || 1;
+
+      async function calculateGoal(goalName: string): Promise<GoalConversionData> {
+        const [currGoalRes, prevGoalRes] = await Promise.all([
+          pool.query(`SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=$1 AND timestamp>=$2 AND timestamp<=$3`, [goalName, since, until]),
+          pool.query(`SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=$1 AND timestamp>=$2 AND timestamp<$3`, [goalName, prevSince, prevUntil])
+        ]);
+        const currGoal = currGoalRes.rows[0];
+        const prevGoal = prevGoalRes.rows[0];
+
+        const count = parseInt(currGoal?.count || '0', 10);
+        const uniqueUsers = parseInt(currGoal?.uu || '0', 10);
+        const uniqueSessions = parseInt(currGoal?.us || '0', 10);
+        const conversionRate = Math.round((uniqueSessions / (totalSessions || 1)) * 10000) / 100;
+
+        const prevCount = parseInt(prevGoal?.count || '0', 10);
+        const prevUniqueUsers = parseInt(prevGoal?.uu || '0', 10);
+        const prevUniqueSessions = parseInt(prevGoal?.us || '0', 10);
+        const prevConversionRate = Math.round((prevUniqueSessions / (prevTotalSessions || 1)) * 10000) / 100;
+
+        const change = prevCount === 0 ? (count > 0 ? 100 : 0) : Math.round(((count - prevCount) / prevCount) * 10000) / 100;
+
+        return {
+          goal: goalName,
+          count,
+          uniqueUsers,
+          uniqueSessions,
+          conversionRate,
+          prevCount,
+          prevUniqueUsers,
+          prevUniqueSessions,
+          prevConversionRate,
+          change
+        };
+      }
+
+      if (targetGoal) {
+        return await calculateGoal(targetGoal);
+      } else {
+        const goalsRes = await pool.query(`SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=$1 AND timestamp<=$2`, [since, until]);
+        return await Promise.all(goalsRes.rows.map((g: any) => calculateGoal(g.event_type)));
+      }
     },
 
     async getUsers({ limit = 50, offset = 0 }: UsersOptions = {}): Promise<UsersData> {
@@ -236,13 +310,12 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
       }));
     },
 
-    async getEvents({ since }: OverviewOptions = {}): Promise<any> {
-      const cutoff = since || sinceDefault();
-      const prev = new Date(Date.now() - 60 * 86400000).toISOString();
+    async getEvents(options: OverviewOptions = {}): Promise<any> {
+      const { since, until, prevSince, prevUntil } = normalizeDateRange(options.since, options.until);
       const [eventsRes, prevEventsRes, trendRes] = await Promise.all([
-        pool.query(`SELECT event_type, COUNT(*) as count, COUNT(DISTINCT user_id) as unique_users FROM events WHERE timestamp>=$1 AND event_type!='pageview' GROUP BY event_type ORDER BY count DESC`, [cutoff]),
-        pool.query(`SELECT event_type, COUNT(*) as count FROM events WHERE timestamp>=$1 AND timestamp<$2 AND event_type!='pageview' GROUP BY event_type`, [prev, cutoff]),
-        pool.query(`SELECT event_type, TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD') as date, COUNT(*) as count FROM events WHERE timestamp>=$1 AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [cutoff])
+        pool.query(`SELECT event_type, COUNT(*) as count, COUNT(DISTINCT user_id) as unique_users FROM events WHERE timestamp>=$1 AND timestamp<=$2 AND event_type!='pageview' GROUP BY event_type ORDER BY count DESC`, [since, until]),
+        pool.query(`SELECT event_type, COUNT(*) as count FROM events WHERE timestamp>=$1 AND timestamp<$2 AND event_type!='pageview' GROUP BY event_type`, [prevSince, prevUntil]),
+        pool.query(`SELECT event_type, TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD') as date, COUNT(*) as count FROM events WHERE timestamp>=$1 AND timestamp<=$2 AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [since, until])
       ]);
       
       const prevMap = Object.fromEntries(prevEventsRes.rows.map((e: any) => [e.event_type, parseInt(e.count, 10)]));
@@ -303,6 +376,7 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
     },
 
     async runRollup(cfg?: RollupConfig): Promise<void> {
+      const cutoffDays = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
       const cutoff = cutoffDays(cfg?.keepRawEventsDays || 30);
       
       await pool.query(

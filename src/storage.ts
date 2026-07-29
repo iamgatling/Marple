@@ -62,6 +62,48 @@ export function extractUtmParams(url?: string | null): UtmParams {
   }
 }
 
+export interface DateRange {
+  since: string;
+  until: string;
+  prevSince: string;
+  prevUntil: string;
+  durationMs: number;
+}
+
+export function normalizeDateRange(sinceInput?: string, untilInput?: string): DateRange {
+  let untilMs = untilInput ? new Date(untilInput).getTime() : Date.now();
+  if (isNaN(untilMs)) untilMs = Date.now();
+
+  if (untilInput && /^\d{4}-\d{2}-\d{2}$/.test(untilInput)) {
+    const [y, m, d] = untilInput.split('-').map(Number);
+    untilMs = Date.UTC(y, m - 1, d, 23, 59, 59, 999);
+  }
+
+  let sinceMs = sinceInput ? new Date(sinceInput).getTime() : untilMs - 30 * 86400000;
+  if (isNaN(sinceMs)) sinceMs = untilMs - 30 * 86400000;
+
+  if (sinceInput && /^\d{4}-\d{2}-\d{2}$/.test(sinceInput)) {
+    const [y, m, d] = sinceInput.split('-').map(Number);
+    sinceMs = Date.UTC(y, m - 1, d, 0, 0, 0, 0);
+  }
+
+  if (sinceMs >= untilMs) {
+    sinceMs = untilMs - 30 * 86400000;
+  }
+
+  const durationMs = untilMs - sinceMs;
+  const prevUntilMs = sinceMs;
+  const prevSinceMs = sinceMs - durationMs;
+
+  return {
+    since: new Date(sinceMs).toISOString(),
+    until: new Date(untilMs).toISOString(),
+    prevSince: new Date(prevSinceMs).toISOString(),
+    prevUntil: new Date(prevUntilMs).toISOString(),
+    durationMs
+  };
+}
+
 export function getPublicConfig(config: Record<string, any> = {}): Record<string, any> {
   if (!config || typeof config !== 'object') return {};
 

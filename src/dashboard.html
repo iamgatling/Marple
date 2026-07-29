@@ -339,6 +339,30 @@
       <h1>Overview</h1>
       <h2>Live traffic & high-level app health</h2>
       
+      <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 24px; background: var(--bg-panel); padding: 16px; border-radius: var(--radius); border: 1px solid var(--border);">
+        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+          <label style="font-weight: 500; font-size: 14px; color: var(--text-muted);">Date Range:</label>
+          <select id="date-preset" style="width: auto; padding: 8px 12px;">
+            <option value="30d" selected>Last 30 Days</option>
+            <option value="7d">Last 7 Days</option>
+            <option value="this_week">This Week vs Last Week</option>
+            <option value="custom">Custom Window</option>
+          </select>
+          <div id="custom-date-container" style="display: none; align-items: center; gap: 8px;">
+            <input type="date" id="date-since" style="width: auto; padding: 8px 12px;">
+            <span style="color: var(--text-muted);">to</span>
+            <input type="date" id="date-until" style="width: auto; padding: 8px 12px;">
+            <button id="apply-date-btn" style="padding: 8px 14px;">Apply</button>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <label style="font-weight: 500; font-size: 14px; color: var(--text-muted);">Target Goal:</label>
+          <select id="ov-goal-select" style="width: auto; min-width: 180px; padding: 8px 12px;">
+            <option value="">All Events / Select Goal</option>
+          </select>
+        </div>
+      </div>
+
       <div class="grid grid-cols-4" style="margin-bottom: 24px;">
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -350,14 +374,59 @@
         <div class="card">
           <h3>Total Events</h3>
           <div class="metric-value" id="ov-events">-</div>
+          <div id="ov-events-change" style="font-size: 12px; font-weight: 500; margin-top: 4px; color: var(--text-muted);">-</div>
         </div>
         <div class="card">
           <h3>Unique Sessions</h3>
           <div class="metric-value" id="ov-sessions">-</div>
+          <div id="ov-sessions-change" style="font-size: 12px; font-weight: 500; margin-top: 4px; color: var(--text-muted);">-</div>
         </div>
         <div class="card">
           <h3>Unique Users</h3>
           <div class="metric-value" id="ov-users">-</div>
+          <div id="ov-users-change" style="font-size: 12px; font-weight: 500; margin-top: 4px; color: var(--text-muted);">-</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom: 24px;" id="goal-conversions-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 12px;">
+          <h3 style="margin: 0; border: none; padding: 0;">Target Goal Conversions ("Goals")</h3>
+          <span class="badge" id="goal-name-badge" style="display: none;">-</span>
+        </div>
+        <div class="grid grid-cols-4" style="margin-bottom: 16px;">
+          <div style="background: var(--bg); padding: 16px; border-radius: 8px; border: 1px solid var(--border);">
+            <div style="font-size: 12px; color: var(--text-muted);">Target Goal Conversions</div>
+            <div class="metric-value" id="goal-count" style="font-size: 28px; margin: 4px 0;">-</div>
+            <div id="goal-count-change" style="font-size: 12px; font-weight: 500;">-</div>
+          </div>
+          <div style="background: var(--bg); padding: 16px; border-radius: 8px; border: 1px solid var(--border);">
+            <div style="font-size: 12px; color: var(--text-muted);">Conversion Rate</div>
+            <div class="metric-value" id="goal-rate" style="font-size: 28px; margin: 4px 0;">-</div>
+            <div id="goal-rate-change" style="font-size: 12px; font-weight: 500;">-</div>
+          </div>
+          <div style="background: var(--bg); padding: 16px; border-radius: 8px; border: 1px solid var(--border);">
+            <div style="font-size: 12px; color: var(--text-muted);">Unique Converting Users</div>
+            <div class="metric-value" id="goal-users" style="font-size: 28px; margin: 4px 0;">-</div>
+          </div>
+          <div style="background: var(--bg); padding: 16px; border-radius: 8px; border: 1px solid var(--border);">
+            <div style="font-size: 12px; color: var(--text-muted);">Unique Converting Sessions</div>
+            <div class="metric-value" id="goal-sessions" style="font-size: 28px; margin: 4px 0;">-</div>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Target Goal Event</th>
+                <th>Conversions</th>
+                <th>Conversion Rate</th>
+                <th>Unique Users</th>
+                <th>Prev Period Count</th>
+                <th>Period-over-Period Change</th>
+              </tr>
+            </thead>
+            <tbody id="goal-conversions-list"></tbody>
+          </table>
         </div>
       </div>
 
@@ -497,113 +566,8 @@
       });
     });
 
-    // We add mock data to the fetchAPI so the UI is testable and looks beautiful on first run!
     async function fetchAPI(endpoint, options = {}) {
       try {
-        // MOCK DATA LAYER
-        if (endpoint.includes('/overview')) {
-          return {
-            activeNow: 42,
-            totalEvents: 145902,
-            uniqueSessions: 12430,
-            uniqueUsers: 8405,
-            topPages: [
-              { page: '/home', views: 8420 },
-              { page: '/pricing', views: 3210 },
-              { page: '/signup', views: 1890 },
-              { page: '/docs/api', views: 940 }
-            ],
-            topReferrers: [
-              { referrer: 'google.com', count: 5430 },
-              { referrer: 'Direct', count: 4100 },
-              { referrer: 'twitter.com', count: 1250 },
-              { referrer: 'github.com', count: 880 }
-            ],
-            countries: [
-              { country: 'United States', count: 45000 },
-              { country: 'United Kingdom', count: 18000 },
-              { country: 'Germany', count: 12400 },
-              { country: 'Canada', count: 8500 }
-            ],
-            browsers: [
-              { browser: 'Chrome', count: 85000 },
-              { browser: 'Safari', count: 42000 },
-              { browser: 'Firefox', count: 12000 }
-            ],
-            devices: [
-              { device_type: 'Desktop', count: 74000 },
-              { device_type: 'Mobile', count: 68000 },
-              { device_type: 'Tablet', count: 3902 }
-            ]
-          };
-        }
-        
-        if (endpoint.includes('/users')) {
-          return {
-            users: Array.from({length: 6}).map((_, i) => ({
-              id: `usr_${Math.random().toString(36).substr(2, 9)}`,
-              first_seen: Date.now() - (Math.random() * 10000000000),
-              last_seen: Date.now() - (Math.random() * 10000000),
-              browser: ['Chrome', 'Safari', 'Firefox'][i%3],
-              device_type: ['Mac', 'iOS', 'Windows', 'Android'][i%4],
-              event_count: Math.floor(Math.random() * 500) + 10
-            }))
-          };
-        }
-
-        if (endpoint.includes('/cohorts')) {
-          const weeks = ['Oct 2', 'Oct 9', 'Oct 16', 'Oct 23', 'Oct 30'];
-          let cohorts = [];
-          weeks.forEach((w, i) => {
-            let size = 1200 + Math.floor(Math.random() * 500);
-            for(let j=0; j<5-i; j++) {
-               cohorts.push({
-                 cohort_week: w,
-                 week_num: j,
-                 cohort_size: size,
-                 retained: Math.floor(size * Math.pow(0.5, j))
-               });
-            }
-          });
-          return cohorts;
-        }
-
-        if (endpoint.includes('/events')) {
-          return {
-            events: [
-              { event_type: 'pageview', count: 85000, prev_count: 82000, unique_users: 8405 },
-              { event_type: 'click:signup', count: 4200, prev_count: 3800, unique_users: 3100 },
-              { event_type: 'payment:success', count: 840, prev_count: 850, unique_users: 790 },
-              { event_type: 'error:auth', count: 120, prev_count: 45, unique_users: 90 }
-            ]
-          };
-        }
-
-        if (endpoint.includes('/config')) {
-          return {
-            "app_id": "app_982hfkj28",
-            "data_retention_days": 90,
-            "sampling_rate": 1.0,
-            "ignore_ips": ["192.168.1.1", "10.0.0.5"],
-            "features": {
-               "heatmaps": false,
-               "session_replay": true,
-               "error_tracking": true
-            },
-            "last_updated": new Date().toISOString()
-          };
-        }
-
-        if (endpoint.includes('/funnel')) {
-          const body = JSON.parse(options.body);
-          return body.steps.map((s, i) => ({
-             step: s.label,
-             count: i === 0 ? 15000 : 4500,
-             dropoff: i === 0 ? 0 : 70
-          }));
-        }
-        
-        // Original fetch functionality (bypassed by mocks above for demo purposes)
         const url = window.location.pathname.replace(/\/$/, '') + '/api' + endpoint;
         const res = await fetch(url, options);
         if (!res.ok) throw new Error('API Error');
@@ -639,14 +603,138 @@
       }).join('');
     }
 
+    let currentSince = new Date(Date.now() - 30 * 86400000).toISOString();
+    let currentUntil = '';
+    let currentGoal = '';
+
+    function getQueryParams() {
+      let params = [];
+      if (currentSince) params.push('since=' + encodeURIComponent(currentSince));
+      if (currentUntil) params.push('until=' + encodeURIComponent(currentUntil));
+      if (currentGoal) params.push('goal=' + encodeURIComponent(currentGoal));
+      return params.length ? '?' + params.join('&') : '';
+    }
+
+    function renderChangeBadge(curr, prev) {
+      if (prev === undefined || prev === null) return '-';
+      const diff = curr - prev;
+      if (prev === 0) {
+        if (curr > 0) return `<span style="color:#10b981;">+100% vs prev (${prev.toLocaleString()})</span>`;
+        return `<span style="color:var(--text-muted);">0% vs prev (0)</span>`;
+      }
+      const pct = Math.round(((curr - prev) / prev) * 1000) / 10;
+      const sign = pct > 0 ? '+' : '';
+      const color = pct > 0 ? '#10b981' : (pct < 0 ? '#ef4444' : 'var(--text-muted)');
+      return `<span style="color:${color};">${sign}${pct}% vs prev (${prev.toLocaleString()})</span>`;
+    }
+
+    // Event listeners for date range preset and target goal
+    document.getElementById('date-preset').addEventListener('change', (e) => {
+      const preset = e.target.value;
+      const customContainer = document.getElementById('custom-date-container');
+      if (preset === 'custom') {
+        customContainer.style.display = 'inline-flex';
+        return;
+      } else {
+        customContainer.style.display = 'none';
+      }
+
+      const now = new Date();
+      currentUntil = '';
+      if (preset === '30d') {
+        currentSince = new Date(now.getTime() - 30 * 86400000).toISOString();
+      } else if (preset === '7d') {
+        currentSince = new Date(now.getTime() - 7 * 86400000).toISOString();
+      } else if (preset === 'this_week') {
+        currentUntil = now.toISOString();
+        currentSince = new Date(now.getTime() - 7 * 86400000).toISOString();
+      }
+      loadOverview();
+    });
+
+    document.getElementById('apply-date-btn').addEventListener('click', () => {
+      const s = document.getElementById('date-since').value;
+      const u = document.getElementById('date-until').value;
+      if (s) currentSince = s;
+      if (u) currentUntil = u;
+      loadOverview();
+    });
+
+    document.getElementById('ov-goal-select').addEventListener('change', (e) => {
+      currentGoal = e.target.value;
+      loadOverview();
+    });
+
     async function loadOverview() {
-      const data = await fetchAPI('/overview?since=' + new Date(Date.now() - 30*86400000).toISOString());
+      const q = getQueryParams();
+      const [data, conversionsData] = await Promise.all([
+        fetchAPI('/overview' + q),
+        fetchAPI('/conversions' + q)
+      ]);
+
       if (!data) return;
-      
+
       document.getElementById('ov-active').textContent = data.activeNow;
       document.getElementById('ov-events').textContent = data.totalEvents.toLocaleString();
       document.getElementById('ov-sessions').textContent = data.uniqueSessions.toLocaleString();
       document.getElementById('ov-users').textContent = data.uniqueUsers.toLocaleString();
+
+      if (data.previousPeriod) {
+        document.getElementById('ov-events-change').innerHTML = renderChangeBadge(data.totalEvents, data.previousPeriod.totalEvents);
+        document.getElementById('ov-sessions-change').innerHTML = renderChangeBadge(data.uniqueSessions, data.previousPeriod.uniqueSessions);
+        document.getElementById('ov-users-change').innerHTML = renderChangeBadge(data.uniqueUsers, data.previousPeriod.uniqueUsers);
+      }
+
+      // Populate available goals dropdown
+      const goalSelect = document.getElementById('ov-goal-select');
+      const savedGoal = currentGoal;
+      const avail = data.availableGoals || [];
+      let optionsHtml = '<option value="">All Events / Select Goal</option>';
+      avail.forEach(g => {
+        optionsHtml += `<option value="${esc(g)}" ${g === savedGoal ? 'selected' : ''}>${esc(g)}</option>`;
+      });
+      goalSelect.innerHTML = optionsHtml;
+      if (savedGoal && avail.includes(savedGoal)) {
+        goalSelect.value = savedGoal;
+      }
+
+      // Render Goal Conversions Section
+      const goalsList = Array.isArray(conversionsData) ? conversionsData : (conversionsData ? [conversionsData] : []);
+      const selectedConversion = data.conversion || (goalsList.length ? goalsList[0] : null);
+
+      if (selectedConversion) {
+        document.getElementById('goal-name-badge').style.display = 'inline-block';
+        document.getElementById('goal-name-badge').textContent = selectedConversion.goal;
+        document.getElementById('goal-count').textContent = selectedConversion.count.toLocaleString();
+        document.getElementById('goal-count-change').innerHTML = renderChangeBadge(selectedConversion.count, selectedConversion.prevCount);
+        document.getElementById('goal-rate').textContent = selectedConversion.conversionRate + '%';
+        document.getElementById('goal-rate-change').innerHTML = renderChangeBadge(selectedConversion.conversionRate, selectedConversion.prevConversionRate);
+        document.getElementById('goal-users').textContent = selectedConversion.uniqueUsers.toLocaleString();
+        document.getElementById('goal-sessions').textContent = selectedConversion.uniqueSessions.toLocaleString();
+      } else {
+        document.getElementById('goal-name-badge').style.display = 'none';
+        document.getElementById('goal-count').textContent = '0';
+        document.getElementById('goal-count-change').textContent = '-';
+        document.getElementById('goal-rate').textContent = '0%';
+        document.getElementById('goal-rate-change').textContent = '-';
+        document.getElementById('goal-users').textContent = '0';
+        document.getElementById('goal-sessions').textContent = '0';
+      }
+
+      // Render Goal Conversions Table
+      renderTable(goalsList, 'goal-conversions-list', [
+        { key: 'goal', format: v => `<span class="badge">${esc(v)}</span>` },
+        { key: 'count', format: v => v.toLocaleString() },
+        { key: 'conversionRate', format: v => `${v}%` },
+        { key: 'uniqueUsers', format: v => v.toLocaleString() },
+        { key: 'prevCount', format: v => v.toLocaleString() },
+        { key: 'change', format: (v, r) => {
+            const sign = v > 0 ? '+' : '';
+            const color = v > 0 ? '#10b981' : (v < 0 ? '#ef4444' : 'var(--text-muted)');
+            return `<span style="color:${color};font-weight:600;">${sign}${v}%</span>`;
+          }
+        }
+      ]);
 
       const maxViews = data.topPages[0]?.views || 0;
       renderTable(data.topPages, 'ov-pages', [
@@ -662,12 +750,13 @@
         { key: 'country' }, { key: 'count', format: v => v.toLocaleString() }
       ]);
       
-      document.getElementById('ov-browsers').innerHTML = data.browsers.map(b => 
-        `<li><span class="badge" style="width:50px;text-align:center;display:inline-block;margin-right:8px;">${Math.round((b.count/data.totalEvents)*100)}%</span> ${esc(b.browser)}</li>`
+      const totalEvt = data.totalEvents || 1;
+      document.getElementById('ov-browsers').innerHTML = (data.browsers || []).map(b => 
+        `<li><span class="badge" style="width:50px;text-align:center;display:inline-block;margin-right:8px;">${Math.round((b.count / totalEvt) * 100)}%</span> ${esc(b.browser)}</li>`
       ).join('');
       
-      document.getElementById('ov-devices').innerHTML = data.devices.map(d => 
-        `<li><span class="badge" style="width:50px;text-align:center;display:inline-block;margin-right:8px;">${Math.round((d.count/data.totalEvents)*100)}%</span> ${esc(d.device_type)}</li>`
+      document.getElementById('ov-devices').innerHTML = (data.devices || []).map(d => 
+        `<li><span class="badge" style="width:50px;text-align:center;display:inline-block;margin-right:8px;">${Math.round((d.count / totalEvt) * 100)}%</span> ${esc(d.device_type)}</li>`
       ).join('');
     }
 
@@ -718,7 +807,7 @@
     }
 
     async function loadActions() {
-      const data = await fetchAPI('/events');
+      const data = await fetchAPI('/events' + getQueryParams());
       if (data && data.events) {
         renderTable(data.events, 'actions-list', [
           { key: 'event_type', format: v => `<span class="badge">${esc(v)}</span>` },

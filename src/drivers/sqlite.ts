@@ -1,12 +1,13 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { createRequire } from 'module';
-import { parseBrowser, parseDevice, maskIp, extractUtmParams, getPublicConfig } from '../storage.js';
+import { parseBrowser, parseDevice, maskIp, extractUtmParams, getPublicConfig, normalizeDateRange } from '../storage.js';
 import {
   Driver,
   TrackEvent,
   OverviewOptions,
   OverviewData,
+  GoalConversionData,
   UsersOptions,
   UsersData,
   UserProfileData,
@@ -117,9 +118,6 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
     try { await dbRun(db, `ALTER TABLE events ADD COLUMN ${col} TEXT`); } catch {}
   }
 
-  const cutoffDays = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
-  const sinceDefault = () => cutoffDays(30);
-
   const storageObj: Driver = {
     async writeEvent(ev: TrackEvent): Promise<void> {
       const browser = parseBrowser(ev.ua || '');
@@ -159,23 +157,99 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       }
     },
 
-    async getOverview({ since }: OverviewOptions = {}): Promise<OverviewData> {
-      const cutoff = since || sinceDefault();
-      const [totals, active, topPages, topReferrers, browsers, devices, countries, dailyViews] = await Promise.all([
-        dbGet(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=?`, [cutoff]),
+    async getOverview(options: OverviewOptions = {}): Promise<OverviewData> {
+      const { since, until, prevSince, prevUntil } = normalizeDateRange(options.since, options.until);
+      const targetGoal = options.goal || options.targetGoal;
+
+      const [totals, prevTotals, active, topPages, topReferrers, browsers, devices, countries, dailyViews, availGoals] = await Promise.all([
+        dbGet(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=? AND timestamp<=?`, [since, until]),
+        dbGet(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=? AND timestamp<?`, [prevSince, prevUntil]),
         dbGet(db, `SELECT COUNT(*) as n FROM sessions WHERE last_seen_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-5 minutes')`),
-        dbAll(db, `SELECT url as page, COUNT(*) as views FROM events WHERE event_type='pageview' AND url IS NOT NULL AND timestamp>=? GROUP BY url ORDER BY views DESC LIMIT 10`, [cutoff]),
-        dbAll(db, `SELECT referrer, COUNT(*) as count FROM events WHERE referrer IS NOT NULL AND referrer!='' AND timestamp>=? GROUP BY referrer ORDER BY count DESC LIMIT 10`, [cutoff]),
-        dbAll(db, `SELECT browser, COUNT(*) as count FROM events WHERE timestamp>=? AND browser IS NOT NULL GROUP BY browser ORDER BY count DESC`, [cutoff]),
-        dbAll(db, `SELECT device_type, COUNT(*) as count FROM events WHERE timestamp>=? AND device_type IS NOT NULL GROUP BY device_type ORDER BY count DESC`, [cutoff]),
-        dbAll(db, `SELECT country, COUNT(*) as count FROM events WHERE timestamp>=? AND country IS NOT NULL AND country!='' GROUP BY country ORDER BY count DESC LIMIT 10`, [cutoff]),
-        dbAll(db, `SELECT substr(timestamp,1,10) as date, COUNT(*) as views FROM events WHERE event_type='pageview' AND timestamp>=? GROUP BY date ORDER BY date ASC`, [cutoff]),
+        dbAll(db, `SELECT url as page, COUNT(*) as views FROM events WHERE event_type='pageview' AND url IS NOT NULL AND timestamp>=? AND timestamp<=? GROUP BY url ORDER BY views DESC LIMIT 10`, [since, until]),
+        dbAll(db, `SELECT referrer, COUNT(*) as count FROM events WHERE referrer IS NOT NULL AND referrer!='' AND timestamp>=? AND timestamp<=? GROUP BY referrer ORDER BY count DESC LIMIT 10`, [since, until]),
+        dbAll(db, `SELECT browser, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND browser IS NOT NULL GROUP BY browser ORDER BY count DESC`, [since, until]),
+        dbAll(db, `SELECT device_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND device_type IS NOT NULL GROUP BY device_type ORDER BY count DESC`, [since, until]),
+        dbAll(db, `SELECT country, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND country IS NOT NULL AND country!='' GROUP BY country ORDER BY count DESC LIMIT 10`, [since, until]),
+        dbAll(db, `SELECT substr(timestamp,1,10) as date, COUNT(*) as views FROM events WHERE event_type='pageview' AND timestamp>=? AND timestamp<=? GROUP BY date ORDER BY date ASC`, [since, until]),
+        dbAll(db, `SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=? AND timestamp<=?`, [since, until]),
       ]);
+
+      const availableGoals = availGoals.map((r: any) => r.event_type);
+
+      let conversion: GoalConversionData | null = null;
+      if (targetGoal) {
+        const goalRes = await storageObj.getConversions!({ since: options.since, until: options.until, goal: targetGoal });
+        if (Array.isArray(goalRes)) {
+          conversion = goalRes[0] || null;
+        } else {
+          conversion = goalRes;
+        }
+      }
+
       return {
-        totalEvents: totals?.te || 0, uniqueSessions: totals?.us || 0,
-        uniqueUsers: totals?.uu || 0, activeNow: active?.n || 0,
-        topPages, topReferrers, browsers, devices, countries, dailyViews
+        totalEvents: totals?.te || 0,
+        uniqueSessions: totals?.us || 0,
+        uniqueUsers: totals?.uu || 0,
+        activeNow: active?.n || 0,
+        topPages, topReferrers, browsers, devices, countries, dailyViews,
+        previousPeriod: {
+          totalEvents: prevTotals?.te || 0,
+          uniqueSessions: prevTotals?.us || 0,
+          uniqueUsers: prevTotals?.uu || 0
+        },
+        conversion,
+        availableGoals
       };
+    },
+
+    async getConversions(options: OverviewOptions = {}): Promise<GoalConversionData[] | GoalConversionData | null> {
+      const { since, until, prevSince, prevUntil } = normalizeDateRange(options.since, options.until);
+      const targetGoal = options.goal || options.targetGoal;
+
+      const [totalSessionsRow, prevTotalSessionsRow] = await Promise.all([
+        dbGet(db, `SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=? AND timestamp<=?`, [since, until]),
+        dbGet(db, `SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=? AND timestamp<?`, [prevSince, prevUntil])
+      ]);
+      const totalSessions = totalSessionsRow?.us || 1;
+      const prevTotalSessions = prevTotalSessionsRow?.us || 1;
+
+      async function calculateGoal(goalName: string): Promise<GoalConversionData> {
+        const [currGoal, prevGoal] = await Promise.all([
+          dbGet(db, `SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=? AND timestamp>=? AND timestamp<=?`, [goalName, since, until]),
+          dbGet(db, `SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=? AND timestamp>=? AND timestamp<?`, [goalName, prevSince, prevUntil])
+        ]);
+        const count = currGoal?.count || 0;
+        const uniqueUsers = currGoal?.uu || 0;
+        const uniqueSessions = currGoal?.us || 0;
+        const conversionRate = Math.round((uniqueSessions / (totalSessions || 1)) * 10000) / 100;
+
+        const prevCount = prevGoal?.count || 0;
+        const prevUniqueUsers = prevGoal?.uu || 0;
+        const prevUniqueSessions = prevGoal?.us || 0;
+        const prevConversionRate = Math.round((prevUniqueSessions / (prevTotalSessions || 1)) * 10000) / 100;
+
+        const change = prevCount === 0 ? (count > 0 ? 100 : 0) : Math.round(((count - prevCount) / prevCount) * 10000) / 100;
+
+        return {
+          goal: goalName,
+          count,
+          uniqueUsers,
+          uniqueSessions,
+          conversionRate,
+          prevCount,
+          prevUniqueUsers,
+          prevUniqueSessions,
+          prevConversionRate,
+          change
+        };
+      }
+
+      if (targetGoal) {
+        return await calculateGoal(targetGoal);
+      } else {
+        const goalsList = await dbAll(db, `SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=? AND timestamp<=?`, [since, until]);
+        return await Promise.all(goalsList.map((g: any) => calculateGoal(g.event_type)));
+      }
     },
 
     async getUsers({ limit = 50, offset = 0 }: UsersOptions = {}): Promise<UsersData> {
@@ -218,13 +292,12 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       `);
     },
 
-    async getEvents({ since }: OverviewOptions = {}): Promise<any> {
-      const cutoff = since || sinceDefault();
-      const prev = new Date(Date.now() - 60 * 86400000).toISOString();
+    async getEvents(options: OverviewOptions = {}): Promise<any> {
+      const { since, until, prevSince, prevUntil } = normalizeDateRange(options.since, options.until);
       const [events, prevEvents, trend] = await Promise.all([
-        dbAll(db, `SELECT event_type, COUNT(*) as count, COUNT(DISTINCT user_id) as unique_users FROM events WHERE timestamp>=? AND event_type!='pageview' GROUP BY event_type ORDER BY count DESC`, [cutoff]),
-        dbAll(db, `SELECT event_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<? AND event_type!='pageview' GROUP BY event_type`, [prev, cutoff]),
-        dbAll(db, `SELECT event_type, substr(timestamp,1,10) as date, COUNT(*) as count FROM events WHERE timestamp>=? AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [cutoff]),
+        dbAll(db, `SELECT event_type, COUNT(*) as count, COUNT(DISTINCT user_id) as unique_users FROM events WHERE timestamp>=? AND timestamp<=? AND event_type!='pageview' GROUP BY event_type ORDER BY count DESC`, [since, until]),
+        dbAll(db, `SELECT event_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<? AND event_type!='pageview' GROUP BY event_type`, [prevSince, prevUntil]),
+        dbAll(db, `SELECT event_type, substr(timestamp,1,10) as date, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [since, until]),
       ]);
       const prevMap = Object.fromEntries(prevEvents.map((e: any) => [e.event_type, e.count]));
       return { events: events.map((e: any) => ({ ...e, prev_count: prevMap[e.event_type] || 0 })), trend };
@@ -266,6 +339,7 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
     },
 
     async runRollup(cfg?: RollupConfig): Promise<void> {
+      const cutoffDays = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
       const cutoff = cutoffDays(cfg?.keepRawEventsDays || 30);
       await dbRun(db, `INSERT OR REPLACE INTO aggregated_metrics(date,metric,dimension,value) SELECT substr(timestamp,1,10),'pageviews',NULL,COUNT(*) FROM events WHERE event_type='pageview' AND timestamp<? GROUP BY substr(timestamp,1,10)`, [cutoff]);
       await dbRun(db, `INSERT OR REPLACE INTO aggregated_metrics(date,metric,dimension,value) SELECT substr(timestamp,1,10),event_type,NULL,COUNT(*) FROM events WHERE event_type!='pageview' AND timestamp<? GROUP BY event_type, substr(timestamp,1,10)`, [cutoff]);

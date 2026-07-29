@@ -104,10 +104,11 @@ async function handleApi(subPath: string, req: any, res: any, storage: Driver): 
   const params = Object.fromEntries(url.searchParams);
 
   try {
-    if (subPath === '/overview')    return send(await storage.getOverview({ since: params.since }));
+    if (subPath === '/overview')    return send(await storage.getOverview({ since: params.since, until: params.until, goal: params.goal || params.targetGoal }));
     if (subPath === '/users')       return send(await storage.getUsers({ limit: +params.limit || 50, offset: +params.offset || 0 }));
     if (subPath === '/cohorts')     return send(typeof storage.getCohorts === 'function' ? await storage.getCohorts() : []);
-    if (subPath === '/events')      return send(typeof storage.getEvents === 'function' ? await storage.getEvents({ since: params.since }) : { events: [], trend: [] });
+    if (subPath === '/events')      return send(typeof storage.getEvents === 'function' ? await storage.getEvents({ since: params.since, until: params.until }) : { events: [], trend: [] });
+    if (subPath === '/conversions' || subPath === '/goals') return send(typeof storage.getConversions === 'function' ? await storage.getConversions({ since: params.since, until: params.until, goal: params.goal || params.targetGoal }) : null);
     if (subPath === '/config')      return send(typeof storage.getPublicConfig === 'function' ? await storage.getPublicConfig() : getPublicConfig(storage.config || {}));
 
     if (subPath.startsWith('/users/')) {

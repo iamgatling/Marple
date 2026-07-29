@@ -1,27 +1,53 @@
 # Marple
 
-Marple is a self-hosted analytics package for JavaScript applications.
+Marple is a self-hosted, privacy-first analytics package for JavaScript/TypeScript applications. It provides server-side event ingestion, a built-in analytics dashboard, and a lightweight browser SDK — all deployable as Express middleware with no external services required.
+
+[![npm version](https://img.shields.io/npm/v/marple)](https://www.npmjs.com/package/marple)
+[![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ## Features
 
-- **Batched non-blocking event ingestion**: High-performance client-side batching and background flushing.
-- **Automatic Event Tracking**: Out-of-the-box tracking for outbound link clicks (`outbound_click`) and file download links (`download`).
-- **Privacy First (DNT & GPC)**: Respects browser `Do Not Track` (DNT) and `Global Privacy Control` (GPC) headers automatically.
-- **Local Storage Options**: SQLite with WAL support or PostgreSQL database engines.
-  - *Note: SQLite uses `PRAGMA synchronous=NORMAL` for optimal performance, which may result in up to one transaction loss during an OS-level crash.*
-- **Mobile-Responsive Dashboard**: Built-in, lightweight Express/Next.js dashboard middleware with dynamic responsive layout.
-- **Explicit authentication**: Customizable authentication callback wrapper for `/marple`.
-- **Zero-config Setup**: Quick setup via `npx marple init`.
-- **TypeScript First**: Full TypeScript types and definitions included out of the box.
+- **Batched Browser SDK**: Client-side event queue flushed every 10 seconds (or when the queue reaches 50 events), using `fetch` with `keepalive` or `navigator.sendBeacon` on page close.
+- **Auto Page-View Tracking**: Fires a `pageview` on init, and patches `history.pushState` / `popstate` for SPA navigation.
+- **Auto Link Tracking**: Detects outbound link clicks (`outbound_click`) and file download clicks (`download`) via a single delegated `document` listener — no configuration needed.
+- **Privacy by Default (DNT & GPC)**: If `navigator.doNotTrack` or `navigator.globalPrivacyControl` is set, the SDK silently disables all event queuing and transmission.
+- **UTM Parameter Extraction**: Automatically parses and stores `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, and `utm_content` from each event URL.
+- **IP Masking**: The last octet of IPv4 addresses (and the last group of IPv6 addresses) is zeroed before storage.
+- **Bot Filtering**: Events from known bots and crawlers are silently dropped on the server using [isbot](https://www.npmjs.com/package/isbot).
+- **Rate Limiting**: The `/collect` endpoint enforces a per-IP limit of 100 requests per 60-second window.
+- **SQLite & PostgreSQL Storage**: Zero-config SQLite (WAL mode) or a PostgreSQL connection string. You can also provide a fully custom `Driver` object.
+  - *SQLite note: Uses `PRAGMA synchronous=NORMAL` — up to one transaction may be lost during an abrupt OS-level crash.*
+- **Data Retention & Rollups**: Configurable raw event retention (default 30 days) and aggregated metric retention (default 365 days), with optional automatic rollup on startup.
+- **Dashboard Middleware**: Mount a full analytics UI (overview, users, funnels, goal conversions, cohorts, events) at any Express route with a single call.
+- **Mandatory Authentication**: The dashboard requires a developer-supplied `authenticate(req)` callback — there is no default open access.
+- **Server-Side Tracking**: Call `marple.track()` directly from your backend to record server-generated events.
+- **Custom Driver Support**: Pass any object implementing the `Driver` interface as `storage` to use your own database backend.
+- **TypeScript First**: Full TypeScript types and `.d.ts` declarations included out of the box.
+- **CLI**: `npx marple init` scaffolds a `marple.config.js` with sensible defaults.
+
+---
+
+## Requirements
+
+- **Node.js >= 18**
+- **SQLite** (peer dep): `npm install sqlite3`
+- **PostgreSQL** (peer dep, optional): `npm install pg`
+
+---
 
 ## Quick Start
 
 ```bash
-npm install marple
+npm install marple sqlite3
 npx marple init
 ```
 
-## Example
+`npx marple init` creates a `marple.config.js` in your project root.
+
+---
+
+## Server Setup (Express)
 
 ```js
 import express from 'express';
@@ -29,20 +55,23 @@ import { marple } from 'marple';
 
 const app = express();
 
+// 1. Initialise Marple
 await marple.init({
-  // Use SQLite (default)
-  storage: 'sqlite',
-  // Or PostgreSQL:
+  storage: 'sqlite',              // 'sqlite' | 'postgres' | custom Driver
+  sqlitePath: './marple.sqlite',  // SQLite only; defaults to './marple.sqlite'
+
+  // PostgreSQL alternative:
   // storage: 'postgres',
   // connectionString: 'postgres://user:pass@localhost:5432/marple_db',
-  
+
   retention: {
-    keepRawEventsDays: 30,
-    keepRollupsDays: 365,
-    autoRollup: true
+    keepRawEventsDays: 30,   // Delete raw events older than 30 days
+    keepRollupsDays: 365,    // Delete aggregated metrics older than 365 days
+    autoRollup: true         // Run rollup automatically on init
   }
 });
 
+// 2. Mount the dashboard (authentication is mandatory)
 app.use('/marple', marple.dashboard({
   authenticate: async (req) => {
     return req.session?.user?.isAdmin === true;
@@ -52,39 +81,195 @@ app.use('/marple', marple.dashboard({
 app.listen(3000);
 ```
 
-## Client Tracking
+---
 
-Include the client SDK in your front-end (assuming you mounted the dashboard at `/marple`):
+## Browser SDK
+
+The client SDK is served automatically at `/marple/client.js` once the middleware is mounted.
 
 ```html
 <script src="/marple/client.js"></script>
 <script>
+  // Initialise — fires a pageview immediately and patches history for SPAs
   window.Marple.init({ endpoint: '/marple/collect' });
-  
-  // Track custom events
-  window.Marple.track('button_clicked', { color: 'red' });
-  
-  // Identify user
-  window.Marple.identify('user_123', { plan: 'pro' });
+
+  // Track a custom event
+  window.Marple.track('signup_button_clicked', { plan: 'pro' });
+
+  // Identify the current user (persisted in localStorage)
+  window.Marple.identify('user_123', { email: 'user@example.com' });
 </script>
 ```
 
-### Auto-Tracking & Privacy Features
+### `init(options?)`
 
-- **Outbound Link Clicks**: Clicks on links leading to external domains automatically emit an `outbound_click` event with target URL and link properties.
-- **File Downloads**: Clicks on links to files (e.g. `.pdf`, `.zip`, `.csv`, `.docx`, etc.) automatically trigger a `download` event with file metadata and extension.
-- **Do Not Track & Global Privacy Control**: If the user has DNT (`navigator.doNotTrack`) or GPC (`navigator.globalPrivacyControl`) enabled in their browser, the SDK automatically disables event queuing and telemetry transmission.
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `endpoint` | `string` | `'/marple/collect'` | URL of the collect endpoint |
+| `sessionId` | `string \| null` | auto-generated per tab | Override the session ID |
+| `userId` | `string \| null` | from `localStorage` | Override the user ID |
 
-## Authenticating the Dashboard
+### `track(eventType, properties?)`
 
-The dashboard is protected via the `authenticate` callback in your middleware options. Return `true` if the request is authorized, or `false` to block access.
+Queues a custom event. Events are flushed every 10 seconds, when the queue reaches 50, or when the page is hidden/unloaded.
 
-```javascript
+### `identify(userId, traits?)`
+
+Sets the current user ID (stored in `localStorage` as `_marple_uid`) and emits an `identify` event with optional trait properties.
+
+---
+
+## Auto-Tracking Events
+
+| Event | Trigger | Properties |
+|---|---|---|
+| `pageview` | On `init()`, `pushState`, and `popstate` | `{ title }` |
+| `outbound_click` | Click on a link to a different hostname | `{ url, href, target }` |
+| `download` | Click on a link with `download` attribute or a recognised file extension (`.pdf`, `.zip`, `.csv`, `.docx`, `.mp4`, etc.) | `{ url, href, extension, target }` |
+
+Auto-tracking is set up once during `init()` and guarded against double-registration.
+
+---
+
+## Server-Side Tracking
+
+Track events directly from your backend:
+
+```js
+await marple.track('order_completed', {
+  orderId: 'abc-123',
+  total: 49.99
+}, {
+  userId: 'user_456',
+  sessionId: 'sid_xyz',
+  ip: req.ip,
+  ua: req.headers['user-agent'],
+  url: 'https://myapp.com/checkout',
+  referrer: req.headers['referer']
+});
+```
+
+---
+
+## Dashboard API Routes
+
+All routes are relative to your mount path (e.g. `/marple`):
+
+| Method | Route | Auth | Description |
+|---|---|---|---|
+| `GET` | `/client.js` | No | Browser SDK JavaScript |
+| `POST` | `/collect` | No | Event ingestion (bot-filtered, rate-limited) |
+| `GET` | `/` | Yes | Analytics dashboard HTML |
+| `GET` | `/api/overview` | Yes | Summary metrics. Params: `since`, `until`, `goal` |
+| `GET` | `/api/users` | Yes | Paginated user list. Params: `limit`, `offset` |
+| `GET` | `/api/users/:userId` | Yes | User profile and event history |
+| `GET` | `/api/events` | Yes | Raw event stream. Params: `since`, `until` |
+| `GET` | `/api/conversions` | Yes | Goal conversion stats. Params: `since`, `until`, `goal` |
+| `GET` | `/api/cohorts` | Yes | Cohort data |
+| `POST` | `/api/funnel` | Yes | Funnel analysis. Body: `{ steps: FunnelStep[] }` |
+| `GET` | `/api/config` | Yes | Public (credential-stripped) server config |
+
+The dashboard HTML is served with `X-Robots-Tag: noindex, nofollow` and `Cache-Control: no-store`.
+
+---
+
+## Authentication
+
+The `authenticate` callback receives the raw Express `Request` object and must return `true` (or `Promise<true>`) to allow access. Any `false` return or thrown exception yields a `401 Unauthorized` response.
+
+```js
 app.use('/marple', marple.dashboard({
   authenticate: async (req) => {
-    // Example: checking an authorization header or session cookie
-    return req.headers.authorization === 'Bearer SECRET_TOKEN';
+    return req.headers.authorization === `Bearer ${process.env.DASHBOARD_TOKEN}`;
   }
 }));
 ```
 
+---
+
+## Custom Driver
+
+Implement the `Driver` interface to use any storage backend:
+
+```ts
+import type { Driver, TrackEvent } from 'marple';
+
+const myDriver: Driver = {
+  async writeEvent(ev: TrackEvent) { /* persist event */ },
+  async getOverview(options)       { /* return OverviewData */ },
+  async getUsers(options)          { /* return UsersData */ },
+  async getFunnel(steps)           { /* return FunnelStepResult[] */ },
+  // Optional methods:
+  async getUserProfile(userId)     { /* return UserProfileData | null */ },
+  async getCohorts()               { /* return any[] */ },
+  async getEvents(options)         { /* return event stream */ },
+  async getConversions(options)    { /* return GoalConversionData */ },
+  async runRollup(config)          { /* aggregate and prune data */ },
+  async getPublicConfig()          { /* return safe config subset */ },
+};
+
+await marple.init({ storage: myDriver });
+```
+
+---
+
+## Data Retention & Rollups
+
+Both SQLite and PostgreSQL drivers support automatic rollups that aggregate raw events into an `aggregated_metrics` table and prune old data.
+
+```js
+await marple.init({
+  retention: {
+    keepRawEventsDays: 30,   // Prune raw events older than N days
+    keepRollupsDays: 365,    // Prune aggregated metrics older than N days
+    autoRollup: true         // Run on startup (default: true)
+  }
+});
+```
+
+---
+
+## TypeScript
+
+All types are exported from `marple`:
+
+```ts
+import type {
+  MarpleConfig,
+  Driver,
+  TrackEvent,
+  OverviewData,
+  OverviewOptions,
+  UsersData,
+  UserRecord,
+  UserProfileData,
+  FunnelStep,
+  FunnelStepResult,
+  GoalConversionData,
+  RollupConfig,
+} from 'marple';
+```
+
+---
+
+## CLI
+
+```bash
+npx marple init    # Scaffold marple.config.js with defaults
+npx marple help    # Show usage
+```
+
+`init` detects your framework (Express, Next.js, or plain Node.js) from `package.json` and prints tailored setup instructions.
+
+---
+
+## Repository
+
+- **GitHub**: [github.com/iamgatling/Marple](https://github.com/iamgatling/Marple)
+- **npm**: [npmjs.com/package/marple](https://www.npmjs.com/package/marple)
+- **Issues**: [github.com/iamgatling/Marple/issues](https://github.com/iamgatling/Marple/issues)
+
+## License
+
+[MIT](LICENSE)
+u

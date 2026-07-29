@@ -19,6 +19,22 @@ export interface TrackEvent {
 
 export interface OverviewOptions {
   since?: string;
+  until?: string;
+  goal?: string;
+  targetGoal?: string;
+}
+
+export interface GoalConversionData {
+  goal: string;
+  count: number;
+  uniqueUsers: number;
+  uniqueSessions: number;
+  conversionRate: number;
+  prevCount: number;
+  prevUniqueUsers: number;
+  prevUniqueSessions: number;
+  prevConversionRate: number;
+  change: number;
 }
 
 export interface OverviewData {
@@ -32,6 +48,14 @@ export interface OverviewData {
   devices: Array<{ device_type: string; count: number }>;
   countries: Array<{ country: string; count: number }>;
   dailyViews: Array<{ date: string; views: number }>;
+  previousPeriod?: {
+    totalEvents: number;
+    uniqueSessions: number;
+    uniqueUsers: number;
+  };
+  conversion?: GoalConversionData | null;
+  goalConversions?: GoalConversionData[];
+  availableGoals?: string[];
 }
 
 export interface UsersOptions {
@@ -103,6 +127,7 @@ export interface Driver {
   getUserProfile?(userId: string): Promise<UserProfileData | null>;
   getCohorts?(): Promise<any[]>;
   getEvents?(options?: OverviewOptions): Promise<any>;
+  getConversions?(options?: OverviewOptions): Promise<GoalConversionData[] | GoalConversionData | null>;
   runRollup?(config?: RollupConfig): Promise<void>;
   getPublicConfig?(): MarpleConfig | Promise<MarpleConfig>;
   config?: MarpleConfig;
