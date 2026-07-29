@@ -1,6 +1,6 @@
 {
   "name": "marple",
-  "version": "2.0.0",
+  "version": "2.3.0",
   "description": "Self-hosted analytics package",
   "type": "module",
   "main": "./dist/index.js",
