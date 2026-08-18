@@ -72,6 +72,7 @@ await marple.init({
 });
 
 // 2. Mount the dashboard (authentication is mandatory)
+// Compatible with global body parsers like express.json()
 app.use('/marple', marple.dashboard({
   authenticate: async (req) => {
     return req.session?.user?.isAdmin === true;

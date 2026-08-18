@@ -43,6 +43,62 @@ function checkRateLimit(ip: string): boolean {
   return false;
 }
 
+async function readJsonBody(req: any, maxBytes: number = 64 * 1024): Promise<{ data: any; payloadTooLarge?: boolean }> {
+  if (req.body !== undefined && req.body !== null) {
+    if (typeof req.body === 'string') {
+      return { data: req.body ? JSON.parse(req.body) : {} };
+    }
+    if (Buffer.isBuffer(req.body)) {
+      const str = req.body.toString('utf-8');
+      return { data: str ? JSON.parse(str) : {} };
+    }
+    return { data: req.body };
+  }
+
+  if (req.readableEnded || req.complete || req.destroyed) {
+    return { data: {} };
+  }
+
+  return new Promise((resolve, reject) => {
+    let body = '';
+    let tooLarge = false;
+
+    const onData = (chunk: any) => {
+      body += chunk;
+      if (Buffer.byteLength(body) > maxBytes) {
+        tooLarge = true;
+        req.removeListener('data', onData);
+        req.removeListener('end', onEnd);
+        req.removeListener('error', onError);
+        resolve({ data: null, payloadTooLarge: true });
+      }
+    };
+
+    const onEnd = () => {
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+      if (tooLarge) return;
+      try {
+        resolve({ data: body ? JSON.parse(body) : {} });
+      } catch (err) {
+        reject(err);
+      }
+    };
+
+    const onError = (err: any) => {
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+      reject(err);
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+  });
+}
+
 async function handleCollect(req: any, res: any, storage: Driver): Promise<void> {
   try {
     const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
@@ -58,22 +114,16 @@ async function handleCollect(req: any, res: any, storage: Driver): Promise<void>
     }
 
     const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KB
-    let body = '';
-    await new Promise<void>((resolve) => {
-      req.on('data', (chunk: any) => {
-        body += chunk;
-        if (Buffer.byteLength(body) > MAX_PAYLOAD_BYTES) {
-          res.writeHead(413);
-          res.end('Payload too large');
-          resolve();
-          return;
-        }
-      });
-      req.on('end', resolve);
-    });
-    if (!body || res.writableEnded) return;
+    const { data: payload, payloadTooLarge } = await readJsonBody(req, MAX_PAYLOAD_BYTES);
 
-    const payload = JSON.parse(body || '{}');
+    if (payloadTooLarge) {
+      res.writeHead(413);
+      res.end('Payload too large');
+      return;
+    }
+
+    if (res.writableEnded) return;
+
     const MAX_EVENTS_PER_BATCH = 50;
     const events: TrackEvent[] = Array.isArray(payload) ? payload : [payload];
     if (events.length > MAX_EVENTS_PER_BATCH) {
@@ -83,7 +133,7 @@ async function handleCollect(req: any, res: any, storage: Driver): Promise<void>
     }
 
     for (const ev of events) {
-      if (!ev.event_type) continue;
+      if (!ev || typeof ev !== 'object' || !ev.event_type) continue;
       await storage.writeEvent({ ...ev, ip, ua, timestamp: new Date().toISOString() });
     }
 
@@ -118,12 +168,8 @@ async function handleApi(subPath: string, req: any, res: any, storage: Driver): 
     }
 
     if (subPath === '/funnel') {
-      let body = '';
-      await new Promise<void>(r => {
-        req.on('data', (c: any) => { body += c; if (body.length > 8192) body = ''; });
-        req.on('end', r);
-      });
-      const { steps } = JSON.parse(body || '{}') as { steps: FunnelStep[] };
+      const { data: bodyData } = await readJsonBody(req, 8192);
+      const { steps } = (bodyData || {}) as { steps: FunnelStep[] };
       return send(await storage.getFunnel(steps));
     }
 

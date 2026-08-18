@@ -35,7 +35,7 @@
   "scripts": {
     "build": "tsc && cp src/dashboard.html dist/dashboard.html",
     "start": "node dist/cli.js",
-    "test": "node --input-type=module -e \"console.log('no tests')\""
+    "test": "npm run build && node --test tests/index.test.js"
   },
   "dependencies": {
     "isbot": "^5.2.1"
