@@ -1,18 +1,17 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert';
 import express from 'express';
-import http from 'http';
-import { existsSync } from 'fs';
-import { openStorage } from '../dist/storage.js';
 import { createDashboardMiddleware } from '../dist/dashboard.js';
 import { marple } from '../dist/index.js';
+import { createTestServer } from './helpers/server.js';
+import { makeRequest } from './helpers/request.js';
+import { createTempDbPath, cleanupDb } from './helpers/db.js';
+
+// Import companion test suites so node --test tests/index.test.js runs everything
+import './contracts.test.js';
+import './regressions.test.js';
 
 describe('Marple Core & Middleware Test Suite', () => {
-  let storage;
-  let middleware;
-  let server;
-  let baseUrl;
-
   const mockStorage = () => {
     const events = [];
     return {
@@ -28,44 +27,9 @@ describe('Marple Core & Middleware Test Suite', () => {
     };
   };
 
-  const makeReq = (urlPath, options = {}) => {
-    return new Promise((resolve, reject) => {
-      const { method = 'GET', body = null, headers = {} } = options;
-      const postData = body ? (typeof body === 'string' ? body : JSON.stringify(body)) : null;
-
-      const reqHeaders = { ...headers };
-      if (postData && !reqHeaders['Content-Type']) {
-        reqHeaders['Content-Type'] = 'application/json';
-      }
-      if (postData) {
-        reqHeaders['Content-Length'] = Buffer.byteLength(postData);
-      }
-
-      const reqOptions = {
-        method,
-        headers: reqHeaders,
-        timeout: 3000
-      };
-
-      const req = http.request(`${baseUrl}${urlPath}`, reqOptions, (res) => {
-        let resBody = '';
-        res.on('data', chunk => { resBody += chunk; });
-        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: resBody }));
-      });
-
-      req.on('timeout', () => {
-        req.destroy();
-        reject(new Error(`Request to ${urlPath} timed out`));
-      });
-
-      req.on('error', reject);
-      if (postData) req.write(postData);
-      req.end();
-    });
-  };
-
   describe('Global Body Parser Compatibility (express.json)', () => {
-    let app, mockStore;
+    let mockStore;
+    let serverHelper;
 
     before(async () => {
       mockStore = mockStorage();
@@ -75,25 +39,19 @@ describe('Marple Core & Middleware Test Suite', () => {
         config: {}
       });
 
-      app = express();
+      const app = express();
       app.use(express.json()); // Body parser
       app.use(mw);
 
-      await new Promise(resolve => {
-        server = app.listen(0, () => {
-          const port = server.address().port;
-          baseUrl = `http://localhost:${port}`;
-          resolve();
-        });
-      });
+      serverHelper = await createTestServer(app);
     });
 
-    after(() => {
-      if (server) server.close();
+    after(async () => {
+      if (serverHelper) await serverHelper.close();
     });
 
     test('/collect handles single event with express.json active', async () => {
-      const res = await makeReq('/collect', {
+      const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
         method: 'POST',
         body: { event_type: 'pageview', url: 'http://localhost/' }
       });
@@ -104,7 +62,7 @@ describe('Marple Core & Middleware Test Suite', () => {
 
     test('/collect handles batch events with express.json active', async () => {
       mockStore.events.length = 0;
-      const res = await makeReq('/collect', {
+      const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
         method: 'POST',
         body: [
           { event_type: 'click_1' },
@@ -116,18 +74,18 @@ describe('Marple Core & Middleware Test Suite', () => {
     });
 
     test('/api/funnel handles POST with express.json active', async () => {
-      const res = await makeReq('/api/funnel', {
+      const res = await makeRequest(`${serverHelper.baseUrl}/api/funnel`, {
         method: 'POST',
         body: { steps: [{ name: 'signup' }] }
       });
       assert.strictEqual(res.status, 200);
-      const parsed = JSON.parse(res.body);
+      const parsed = res.json();
       assert.strictEqual(parsed.conversionRate, 0.75);
     });
 
     test('batch size > 50 returns 400 Bad Request', async () => {
       const hugeBatch = Array.from({ length: 51 }, (_, i) => ({ event_type: `ev_${i}` }));
-      const res = await makeReq('/collect', {
+      const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
         method: 'POST',
         body: hugeBatch
       });
@@ -136,7 +94,8 @@ describe('Marple Core & Middleware Test Suite', () => {
   });
 
   describe('Raw Stream Processing (No Upstream Body Parser)', () => {
-    let app, mockStore;
+    let mockStore;
+    let serverHelper;
 
     before(async () => {
       mockStore = mockStorage();
@@ -146,24 +105,18 @@ describe('Marple Core & Middleware Test Suite', () => {
         config: {}
       });
 
-      app = express();
+      const app = express();
       app.use(mw);
 
-      await new Promise(resolve => {
-        server = app.listen(0, () => {
-          const port = server.address().port;
-          baseUrl = `http://localhost:${port}`;
-          resolve();
-        });
-      });
+      serverHelper = await createTestServer(app);
     });
 
-    after(() => {
-      if (server) server.close();
+    after(async () => {
+      if (serverHelper) await serverHelper.close();
     });
 
     test('/collect handles raw stream event', async () => {
-      const res = await makeReq('/collect', {
+      const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
         method: 'POST',
         body: { event_type: 'raw_event' }
       });
@@ -173,7 +126,7 @@ describe('Marple Core & Middleware Test Suite', () => {
     });
 
     test('/api/funnel handles raw stream POST', async () => {
-      const res = await makeReq('/api/funnel', {
+      const res = await makeRequest(`${serverHelper.baseUrl}/api/funnel`, {
         method: 'POST',
         body: { steps: [{ name: 'step1' }] }
       });
@@ -182,7 +135,8 @@ describe('Marple Core & Middleware Test Suite', () => {
   });
 
   describe('Authentication & Dashboard Endpoints', () => {
-    let app, mockStore;
+    let mockStore;
+    let serverHelper;
 
     before(async () => {
       mockStore = mockStorage();
@@ -192,30 +146,24 @@ describe('Marple Core & Middleware Test Suite', () => {
         config: {}
       });
 
-      app = express();
+      const app = express();
       app.use(mw);
 
-      await new Promise(resolve => {
-        server = app.listen(0, () => {
-          const port = server.address().port;
-          baseUrl = `http://localhost:${port}`;
-          resolve();
-        });
-      });
+      serverHelper = await createTestServer(app);
     });
 
-    after(() => {
-      if (server) server.close();
+    after(async () => {
+      if (serverHelper) await serverHelper.close();
     });
 
     test('/client.js is accessible without authentication', async () => {
-      const res = await makeReq('/client.js');
+      const res = await makeRequest(`${serverHelper.baseUrl}/client.js`);
       assert.strictEqual(res.status, 200);
       assert.strictEqual(res.headers['content-type'], 'application/javascript');
     });
 
     test('/collect is accessible without authentication', async () => {
-      const res = await makeReq('/collect', {
+      const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
         method: 'POST',
         body: { event_type: 'pub_event' }
       });
@@ -223,96 +171,52 @@ describe('Marple Core & Middleware Test Suite', () => {
     });
 
     test('/api/overview returns 401 without auth header', async () => {
-      const res = await makeReq('/api/overview');
+      const res = await makeRequest(`${serverHelper.baseUrl}/api/overview`);
       assert.strictEqual(res.status, 401);
     });
 
     test('/api/overview returns 200 with valid auth header', async () => {
-      const res = await makeReq('/api/overview', {
+      const res = await makeRequest(`${serverHelper.baseUrl}/api/overview`, {
         headers: { 'x-auth': 'secret' }
       });
       assert.strictEqual(res.status, 200);
-      const parsed = JSON.parse(res.body);
+      const parsed = res.json();
       assert.strictEqual(typeof parsed.totalEvents, 'number');
     });
   });
 
   describe('Full Package Integration (Matching test-marple-user)', () => {
-    let app, serverInstance, customBaseUrl;
-    const testDbPath = './test-marple-suite.sqlite';
+    let serverHelper;
+    let testDbPath;
 
     before(async () => {
+      testDbPath = createTempDbPath('pkg-integration');
       await marple.init({
         storage: 'sqlite',
         sqlitePath: testDbPath,
         retention: { keepRawEventsDays: 1, keepRollupsDays: 1, autoRollup: false }
       });
 
-      app = express();
+      const app = express();
       app.use(express.json());
       app.use('/marple', marple.dashboard({ authenticate: () => true }));
 
-      await new Promise(resolve => {
-        serverInstance = app.listen(0, () => {
-          const port = serverInstance.address().port;
-          customBaseUrl = `http://localhost:${port}`;
-          resolve();
-        });
-      });
+      serverHelper = await createTestServer(app);
     });
 
     after(async () => {
-      if (serverInstance) serverInstance.close();
-      try {
-        const { unlinkSync } = await import('fs');
-        if (existsSync(testDbPath)) unlinkSync(testDbPath);
-        if (existsSync(testDbPath + '-wal')) unlinkSync(testDbPath + '-wal');
-        if (existsSync(testDbPath + '-shm')) unlinkSync(testDbPath + '-shm');
-      } catch {}
+      if (serverHelper) await serverHelper.close();
+      cleanupDb(testDbPath);
     });
 
-    const localReq = (urlPath, options = {}) => {
-      return new Promise((resolve, reject) => {
-        const { method = 'GET', body = null } = options;
-        const postData = body ? (typeof body === 'string' ? body : JSON.stringify(body)) : null;
-
-        const reqHeaders = {};
-        if (postData) {
-          reqHeaders['Content-Type'] = 'application/json';
-          reqHeaders['Content-Length'] = Buffer.byteLength(postData);
-        }
-
-        const reqOptions = {
-          method,
-          headers: reqHeaders,
-          timeout: 3000
-        };
-
-        const req = http.request(`${customBaseUrl}${urlPath}`, reqOptions, (res) => {
-          let resBody = '';
-          res.on('data', chunk => { resBody += chunk; });
-          res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: resBody }));
-        });
-
-        req.on('timeout', () => {
-          req.destroy();
-          reject(new Error(`Request to ${urlPath} timed out`));
-        });
-
-        req.on('error', reject);
-        if (postData) req.write(postData);
-        req.end();
-      });
-    };
-
     test('Test A: GET /marple/client.js returned 200 with SDK code', async () => {
-      const res = await localReq('/marple/client.js');
+      const res = await makeRequest(`${serverHelper.baseUrl}/marple/client.js`);
       assert.strictEqual(res.status, 200);
       assert(res.body.includes('Marple'), 'SDK content missing');
     });
 
     test('Test B: POST /marple/collect returned 204 with express.json() active', async () => {
-      const res = await localReq('/marple/collect', {
+      const res = await makeRequest(`${serverHelper.baseUrl}/marple/collect`, {
         method: 'POST',
         body: { event_type: 'pkg_test_event', url: 'http://localhost/test' }
       });
@@ -320,7 +224,7 @@ describe('Marple Core & Middleware Test Suite', () => {
     });
 
     test('Test C: POST /marple/collect batch returned 204', async () => {
-      const res = await localReq('/marple/collect', {
+      const res = await makeRequest(`${serverHelper.baseUrl}/marple/collect`, {
         method: 'POST',
         body: [
           { event_type: 'batch_event_1' },
@@ -331,7 +235,7 @@ describe('Marple Core & Middleware Test Suite', () => {
     });
 
     test('Test D: POST /marple/api/funnel returned 200 with express.json() active', async () => {
-      const res = await localReq('/marple/api/funnel', {
+      const res = await makeRequest(`${serverHelper.baseUrl}/marple/api/funnel`, {
         method: 'POST',
         body: { steps: [] }
       });
@@ -339,11 +243,10 @@ describe('Marple Core & Middleware Test Suite', () => {
     });
 
     test('Test E: GET /marple/api/overview returned 200 (totalEvents >= 3)', async () => {
-      const res = await localReq('/marple/api/overview');
+      const res = await makeRequest(`${serverHelper.baseUrl}/marple/api/overview`);
       assert.strictEqual(res.status, 200);
-      const overview = JSON.parse(res.body);
+      const overview = res.json();
       assert(overview.totalEvents >= 3, `Expected at least 3 events in overview, got ${overview.totalEvents}`);
     });
   });
 });
-
