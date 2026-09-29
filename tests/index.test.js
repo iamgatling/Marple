@@ -9,6 +9,7 @@ import { createTempDbPath, cleanupDb } from './helpers/db.js';
 
 // Import companion test suites so node --test tests/index.test.js runs everything
 import './contracts.test.js';
+import './collect-body.test.js';
 import './regressions.test.js';
 
 describe('Marple Core & Middleware Test Suite', () => {

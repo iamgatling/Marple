@@ -1,9 +1,22 @@
 import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import type { IncomingMessage, ServerResponse } from 'http';
 import { isbot } from 'isbot';
 import { getPublicConfig } from './storage.js';
 import { Driver, MarpleConfig, TrackEvent, FunnelStep } from './types.js';
+
+export type MarpleRequest = IncomingMessage & {
+  body?: unknown;
+  url?: string;
+  headers: IncomingMessage['headers'];
+  socket: IncomingMessage['socket'];
+  [key: string]: any;
+};
+
+export type MarpleResponse = ServerResponse & {
+  [key: string]: any;
+};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,14 +56,83 @@ function checkRateLimit(ip: string): boolean {
   return false;
 }
 
-async function readJsonBody(req: any, maxBytes: number = 64 * 1024): Promise<{ data: any; payloadTooLarge?: boolean }> {
+function sendSafe(
+  res: MarpleResponse,
+  status: number,
+  body?: string | null,
+  headers: Record<string, string> = {}
+): boolean {
+  if (res.headersSent || res.writableEnded || res.destroyed) {
+    return false;
+  }
+  try {
+    res.writeHead(status, headers);
+    if (body !== null && body !== undefined) {
+      res.end(body);
+    } else {
+      res.end();
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface ReadJsonResult {
+  data: any;
+  payloadTooLarge?: boolean;
+  aborted?: boolean;
+}
+
+async function readJsonBody(
+  req: MarpleRequest,
+  maxBytes: number = 64 * 1024
+): Promise<ReadJsonResult> {
+  const contentLengthRaw = req.headers['content-length'];
+  if (contentLengthRaw) {
+    const contentLength = typeof contentLengthRaw === 'string'
+      ? parseInt(contentLengthRaw, 10)
+      : parseInt(contentLengthRaw[0], 10);
+    if (!Number.isNaN(contentLength) && contentLength > maxBytes) {
+      if (!req.readableEnded && !req.destroyed && typeof req.resume === 'function') {
+        req.resume();
+      }
+      return { data: null, payloadTooLarge: true };
+    }
+  }
+
   if (req.body !== undefined && req.body !== null) {
     if (typeof req.body === 'string') {
-      return { data: req.body ? JSON.parse(req.body) : {} };
+      if (Buffer.byteLength(req.body) > maxBytes) {
+        return { data: null, payloadTooLarge: true };
+      }
+      try {
+        return { data: req.body ? JSON.parse(req.body) : {} };
+      } catch {
+        throw new Error('Malformed JSON');
+      }
     }
     if (Buffer.isBuffer(req.body)) {
-      const str = req.body.toString('utf-8');
-      return { data: str ? JSON.parse(str) : {} };
+      if (req.body.length > maxBytes) {
+        return { data: null, payloadTooLarge: true };
+      }
+      try {
+        const str = req.body.toString('utf-8');
+        return { data: str ? JSON.parse(str) : {} };
+      } catch {
+        throw new Error('Malformed JSON');
+      }
+    }
+    if (typeof req.body === 'object') {
+      try {
+        const jsonStr = JSON.stringify(req.body);
+        if (Buffer.byteLength(jsonStr) > maxBytes) {
+          return { data: null, payloadTooLarge: true };
+        }
+      } catch {
+        // If stringify fails, proceed with object as-is
+      }
+      return { data: req.body };
     }
     return { data: req.body };
   }
@@ -60,75 +142,126 @@ async function readJsonBody(req: any, maxBytes: number = 64 * 1024): Promise<{ d
   }
 
   return new Promise((resolve, reject) => {
-    let body = '';
-    let tooLarge = false;
+    let settled = false;
+    let totalBytes = 0;
+    const chunks: Buffer[] = [];
+
+    const cleanup = () => {
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+      req.removeListener('close', onClose);
+      req.removeListener('aborted', onAbort);
+    };
+
+    const finish = (result: ReadJsonResult, isError: boolean = false, error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (isError) {
+        reject(error);
+      } else {
+        resolve(result);
+      }
+    };
 
     const onData = (chunk: any) => {
-      body += chunk;
-      if (Buffer.byteLength(body) > maxBytes) {
-        tooLarge = true;
-        req.removeListener('data', onData);
-        req.removeListener('end', onEnd);
-        req.removeListener('error', onError);
-        resolve({ data: null, payloadTooLarge: true });
+      if (settled) return;
+      try {
+        const buf = Buffer.isBuffer(chunk)
+          ? chunk
+          : Buffer.from(typeof chunk === 'string' ? chunk : String(chunk));
+        totalBytes += buf.length;
+
+        if (totalBytes > maxBytes) {
+          if (!req.readableEnded && !req.destroyed && typeof req.resume === 'function') {
+            req.resume();
+          }
+          finish({ data: null, payloadTooLarge: true });
+          return;
+        }
+
+        chunks.push(buf);
+      } catch (err) {
+        finish({ data: null }, true, err);
       }
     };
 
     const onEnd = () => {
-      req.removeListener('data', onData);
-      req.removeListener('end', onEnd);
-      req.removeListener('error', onError);
-      if (tooLarge) return;
+      if (settled) return;
       try {
-        resolve({ data: body ? JSON.parse(body) : {} });
+        const fullBuffer = Buffer.concat(chunks, totalBytes);
+        const str = fullBuffer.toString('utf-8');
+        const data = str ? JSON.parse(str) : {};
+        finish({ data });
       } catch (err) {
-        reject(err);
+        finish({ data: null }, true, err);
       }
     };
 
     const onError = (err: any) => {
-      req.removeListener('data', onData);
-      req.removeListener('end', onEnd);
-      req.removeListener('error', onError);
-      reject(err);
+      if (settled) return;
+      finish({ data: null }, true, err);
+    };
+
+    const onClose = () => {
+      if (settled) return;
+      if (!req.readableEnded && !req.complete) {
+        finish({ data: null, aborted: true });
+      }
+    };
+
+    const onAbort = () => {
+      if (settled) return;
+      finish({ data: null, aborted: true });
     };
 
     req.on('data', onData);
     req.on('end', onEnd);
     req.on('error', onError);
+    req.on('close', onClose);
+    req.on('aborted', onAbort);
   });
 }
 
-async function handleCollect(req: any, res: any, storage: Driver): Promise<void> {
+async function handleCollect(req: MarpleRequest, res: MarpleResponse, storage: Driver): Promise<void> {
+  if (res.headersSent || res.writableEnded || res.destroyed) return;
+
   try {
-    const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
+    const xff = req.headers['x-forwarded-for'];
+    const rawIp = (Array.isArray(xff) ? xff[0] : xff) || req.socket?.remoteAddress || '';
+    const ip = rawIp.split(',')[0].trim();
     if (checkRateLimit(ip)) {
-      res.writeHead(429, { 'Content-Type': 'text/plain' });
-      return res.end('Too Many Requests');
-    }
-
-    const ua = req.headers['user-agent'] || '';
-    if (isbot(ua)) {
-      res.writeHead(204);
-      return res.end();
-    }
-
-    const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KB
-    const { data: payload, payloadTooLarge } = await readJsonBody(req, MAX_PAYLOAD_BYTES);
-
-    if (payloadTooLarge) {
-      res.writeHead(413);
-      res.end('Payload too large');
+      sendSafe(res, 429, 'Too Many Requests', { 'Content-Type': 'text/plain' });
       return;
     }
 
-    if (res.writableEnded) return;
+    const rawUa = req.headers['user-agent'];
+    const ua = (Array.isArray(rawUa) ? rawUa[0] : rawUa) || '';
+    if (isbot(ua)) {
+      sendSafe(res, 204);
+      return;
+    }
+
+    const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KB
+    const { data: payload, payloadTooLarge, aborted } = await readJsonBody(req, MAX_PAYLOAD_BYTES);
+
+    if (aborted || res.headersSent || res.writableEnded || res.destroyed) {
+      return;
+    }
+
+    if (payloadTooLarge) {
+      sendSafe(res, 413, 'Payload Too Large', {
+        'Content-Type': 'text/plain',
+        'Connection': 'close'
+      });
+      return;
+    }
 
     const MAX_EVENTS_PER_BATCH = 50;
     const events: TrackEvent[] = Array.isArray(payload) ? payload : [payload];
     if (events.length > MAX_EVENTS_PER_BATCH) {
-      res.writeHead(400);
-      res.end('Too many events in batch');
+      sendSafe(res, 400, 'Too many events in batch', { 'Content-Type': 'text/plain' });
       return;
     }
 
@@ -137,20 +270,19 @@ async function handleCollect(req: any, res: any, storage: Driver): Promise<void>
       await storage.writeEvent({ ...ev, ip, ua, timestamp: new Date().toISOString() });
     }
 
-    res.writeHead(204);
-    res.end();
+    sendSafe(res, 204);
   } catch (e: any) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: e.message }));
+    sendSafe(res, 400, JSON.stringify({ error: e?.message || 'Bad Request' }), {
+      'Content-Type': 'application/json'
+    });
   }
 }
 
-async function handleApi(subPath: string, req: any, res: any, storage: Driver): Promise<void> {
+async function handleApi(subPath: string, req: MarpleRequest, res: MarpleResponse, storage: Driver): Promise<void> {
   const send = (data: any, status = 200) => {
-    res.writeHead(status, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(data));
+    sendSafe(res, status, JSON.stringify(data), { 'Content-Type': 'application/json' });
   };
-  const url = new URL(req.url, 'http://localhost');
+  const url = new URL(req.url || '/', 'http://localhost');
   const params = Object.fromEntries(url.searchParams);
 
   try {
@@ -209,7 +341,7 @@ function getClientSDK(): string {
 }
 
 export interface DashboardOptions {
-  authenticate: (req: any) => boolean | Promise<boolean>;
+  authenticate: (req: MarpleRequest) => boolean | Promise<boolean>;
   storage: Driver;
   config: MarpleConfig;
 }
@@ -218,16 +350,16 @@ export function createDashboardMiddleware({ authenticate, storage, config }: Das
   let dashboardHTML = getDashboardHTML();
   let clientSDK = getClientSDK();
 
-  return async function marpleMiddleware(req: any, res: any, next?: any) {
+  return async function marpleMiddleware(req: MarpleRequest, res: MarpleResponse, next?: any) {
     if (config?.dev) {
       dashboardHTML = getDashboardHTML();
       clientSDK = getClientSDK();
     }
-    const rawPath = req.url.split('?')[0].replace(/\/+$/, '') || '/';
+    const rawPath = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
 
     if (rawPath === '/client.js' || rawPath.endsWith('/marple/client.js')) {
-      res.writeHead(200, { 'Content-Type': 'application/javascript', 'Cache-Control': 'public,max-age=3600' });
-      return res.end(clientSDK);
+      sendSafe(res, 200, clientSDK, { 'Content-Type': 'application/javascript', 'Cache-Control': 'public,max-age=3600' });
+      return;
     }
 
     if (rawPath === '/collect' || rawPath.endsWith('/marple/collect')) {
@@ -237,8 +369,11 @@ export function createDashboardMiddleware({ authenticate, storage, config }: Das
     let authed = false;
     try { authed = await authenticate(req); } catch { }
     if (!authed) {
-      res.writeHead(401, { 'Content-Type': 'text/plain', 'X-Robots-Tag': 'noindex' });
-      return res.end('Unauthorized — Marple requires authentication.');
+      sendSafe(res, 401, 'Unauthorized — Marple requires authentication.', {
+        'Content-Type': 'text/plain',
+        'X-Robots-Tag': 'noindex'
+      });
+      return;
     }
 
     const apiMatch = rawPath.match(/\/api(\/.*)?$/);
@@ -246,11 +381,10 @@ export function createDashboardMiddleware({ authenticate, storage, config }: Das
       return handleApi(apiMatch[1] || '/', req, res, storage);
     }
 
-    res.writeHead(200, {
+    sendSafe(res, 200, dashboardHTML, {
       'Content-Type': 'text/html; charset=utf-8',
       'X-Robots-Tag': 'noindex, nofollow',
       'Cache-Control': 'no-store'
     });
-    res.end(dashboardHTML);
   };
 }
