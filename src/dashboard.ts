@@ -5,6 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { isbot } from 'isbot';
 import { getPublicConfig } from './storage.js';
 import { Driver, MarpleConfig, TrackEvent, FunnelStep } from './types.js';
+import { validateIngestBatch, ValidationError, IngestEvent } from './validation.js';
 
 export type MarpleRequest = IncomingMessage & {
   body?: unknown;
@@ -258,16 +259,31 @@ async function handleCollect(req: MarpleRequest, res: MarpleResponse, storage: D
       return;
     }
 
-    const MAX_EVENTS_PER_BATCH = 50;
-    const events: TrackEvent[] = Array.isArray(payload) ? payload : [payload];
-    if (events.length > MAX_EVENTS_PER_BATCH) {
-      sendSafe(res, 400, 'Too many events in batch', { 'Content-Type': 'text/plain' });
+    let validatedEvents: IngestEvent[];
+    try {
+      validatedEvents = validateIngestBatch(payload);
+    } catch (err) {
+      if (err instanceof ValidationError) {
+        sendSafe(res, 400, JSON.stringify({ error: err.message, code: err.code }), {
+          'Content-Type': 'application/json'
+        });
+        return;
+      }
+      sendSafe(res, 400, JSON.stringify({ error: 'Invalid payload', code: 'INVALID_PAYLOAD' }), {
+        'Content-Type': 'application/json'
+      });
       return;
     }
 
-    for (const ev of events) {
-      if (!ev || typeof ev !== 'object' || !ev.event_type) continue;
-      await storage.writeEvent({ ...ev, ip, ua, timestamp: new Date().toISOString() });
+    const serverTimestamp = new Date().toISOString();
+    for (const ev of validatedEvents) {
+      const sanitizedEvent: TrackEvent = {
+        ...ev,
+        ip,
+        ua,
+        timestamp: serverTimestamp
+      };
+      await storage.writeEvent(sanitizedEvent);
     }
 
     sendSafe(res, 204);

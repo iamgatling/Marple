@@ -14,7 +14,6 @@ export interface TrackEvent {
   utm_campaign?: string | null;
   utm_term?: string | null;
   utm_content?: string | null;
-  [key: string]: any;
 }
 
 export interface OverviewOptions {

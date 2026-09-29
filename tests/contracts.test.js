@@ -47,24 +47,24 @@ describe('API Contract & Validation Test Suite', () => {
       assert.strictEqual(writtenEvents.length, 0);
     });
 
-    test('/collect ignores non-event payloads without event_type', async () => {
+    test('/collect rejects non-event payloads without event_type with 400', async () => {
       writtenEvents.length = 0;
       const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
         method: 'POST',
         body: { user_id: 'some_user', irrelevant: 'data' }
       });
-      assert.strictEqual(res.status, 204);
+      assert.strictEqual(res.status, 400);
       assert.strictEqual(writtenEvents.length, 0);
     });
 
-    test('/collect handles non-object primitives gracefully', async () => {
+    test('/collect rejects non-object primitives with 400', async () => {
       writtenEvents.length = 0;
       const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '12345'
       });
-      assert.strictEqual(res.status, 204);
+      assert.strictEqual(res.status, 400);
       assert.strictEqual(writtenEvents.length, 0);
     });
 
@@ -125,7 +125,7 @@ describe('API Contract & Validation Test Suite', () => {
       const res = await makeRequest(`${serverHelper.baseUrl}/collect?event_type=get_leak`, {
         method: 'GET'
       });
-      assert.strictEqual(res.status, 204);
+      assert.strictEqual(res.status, 400);
       assert.strictEqual(writtenEvents.length, 0, 'GET query params should not be ingested as events');
     });
 
@@ -135,7 +135,7 @@ describe('API Contract & Validation Test Suite', () => {
         method: 'PUT',
         body: {}
       });
-      assert.strictEqual(res.status, 204);
+      assert.strictEqual(res.status, 400);
       assert.strictEqual(writtenEvents.length, 0);
     });
 
@@ -144,7 +144,7 @@ describe('API Contract & Validation Test Suite', () => {
       const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
         method: 'DELETE'
       });
-      assert.strictEqual(res.status, 204);
+      assert.strictEqual(res.status, 400);
       assert.strictEqual(writtenEvents.length, 0);
     });
   });
