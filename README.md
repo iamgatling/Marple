@@ -216,14 +216,22 @@ await marple.init({ storage: myDriver });
 
 ## Data Retention & Rollups
 
-Both SQLite and PostgreSQL drivers support automatic rollups that aggregate raw events into an `aggregated_metrics` table and prune old data.
+Both SQLite and PostgreSQL drivers support automatic, transactional, and idempotent rollups that aggregate raw events into an `aggregated_metrics` table and prune old data.
+
+Rollup execution:
+- Aggregates pageviews and custom events by date into `aggregated_metrics` without double-counting.
+- Prunes raw `events` older than `keepRawEventsDays`.
+- Prunes stale `sessions` (`last_seen_at` older than `keepRawEventsDays`).
+- Prunes orphaned `users` (`last_seen` older than `keepRawEventsDays` with no remaining retained events).
+- Prunes `aggregated_metrics` older than `keepRollupsDays`.
+- Runs automatically during `marple.init()` when `autoRollup` is `true` (default).
 
 ```js
 await marple.init({
   retention: {
-    keepRawEventsDays: 30,   // Prune raw events older than N days
+    keepRawEventsDays: 30,   // Prune raw events, stale sessions, and orphaned users
     keepRollupsDays: 365,    // Prune aggregated metrics older than N days
-    autoRollup: true         // Run on startup (default: true)
+    autoRollup: true         // Run automatically on init (default: true)
   }
 });
 ```

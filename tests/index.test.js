@@ -12,6 +12,7 @@ import './contracts.test.js';
 import './collect-body.test.js';
 import './validation.test.js';
 import './proxy.test.js';
+import './retention.test.js';
 import './regressions.test.js';
 
 describe('Marple Core & Middleware Test Suite', () => {

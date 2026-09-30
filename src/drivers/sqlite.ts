@@ -72,8 +72,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   ua           TEXT,
   is_active    INTEGER DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_ses_uid ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_ses_ts  ON sessions(started_at);
+CREATE INDEX IF NOT EXISTS idx_ses_uid       ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_ses_ts        ON sessions(started_at);
+CREATE INDEX IF NOT EXISTS idx_ses_last_seen ON sessions(last_seen_at);
 
 CREATE TABLE IF NOT EXISTS users (
   id          TEXT PRIMARY KEY,
@@ -84,12 +85,13 @@ CREATE TABLE IF NOT EXISTS users (
   device_type TEXT,
   properties  TEXT DEFAULT '{}'
 );
+CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen);
 
 CREATE TABLE IF NOT EXISTS aggregated_metrics (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   date      TEXT NOT NULL,
   metric    TEXT NOT NULL,
-  dimension TEXT,
+  dimension TEXT DEFAULT '',
   value     INTEGER NOT NULL DEFAULT 0,
   UNIQUE(date, metric, dimension)
 );
@@ -117,6 +119,9 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
   for (const col of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content']) {
     try { await dbRun(db, `ALTER TABLE events ADD COLUMN ${col} TEXT`); } catch {}
   }
+  try { await dbRun(db, `CREATE INDEX IF NOT EXISTS idx_ses_last_seen ON sessions(last_seen_at)`); } catch {}
+  try { await dbRun(db, `CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)`); } catch {}
+  try { await dbRun(db, `UPDATE aggregated_metrics SET dimension = '' WHERE dimension IS NULL`); } catch {}
 
   const storageObj: Driver = {
     async writeEvent(ev: TrackEvent): Promise<void> {
@@ -340,12 +345,49 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
 
     async runRollup(cfg?: RollupConfig): Promise<void> {
       const cutoffDays = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
-      const cutoff = cutoffDays(cfg?.keepRawEventsDays || 30);
-      await dbRun(db, `INSERT OR REPLACE INTO aggregated_metrics(date,metric,dimension,value) SELECT substr(timestamp,1,10),'pageviews',NULL,COUNT(*) FROM events WHERE event_type='pageview' AND timestamp<? GROUP BY substr(timestamp,1,10)`, [cutoff]);
-      await dbRun(db, `INSERT OR REPLACE INTO aggregated_metrics(date,metric,dimension,value) SELECT substr(timestamp,1,10),event_type,NULL,COUNT(*) FROM events WHERE event_type!='pageview' AND timestamp<? GROUP BY event_type, substr(timestamp,1,10)`, [cutoff]);
-      await dbRun(db, `DELETE FROM events WHERE timestamp<?`, [cutoff]);
-      const rollupCutoff = cutoffDays(cfg?.keepRollupsDays || 365);
-      await dbRun(db, `DELETE FROM aggregated_metrics WHERE date<?`, [rollupCutoff]);
+      const cutoff = cutoffDays(cfg?.keepRawEventsDays ?? 30);
+      const rollupCutoff = cutoffDays(cfg?.keepRollupsDays ?? 365);
+
+      await dbRun(db, 'BEGIN IMMEDIATE');
+      try {
+        await dbRun(
+          db,
+          `INSERT INTO aggregated_metrics(date, metric, dimension, value)
+           SELECT substr(timestamp, 1, 10), 'pageviews', '', COUNT(*)
+           FROM events
+           WHERE event_type = 'pageview' AND timestamp < ?
+           GROUP BY substr(timestamp, 1, 10)
+           ON CONFLICT(date, metric, dimension) DO UPDATE SET value = aggregated_metrics.value + excluded.value`,
+          [cutoff]
+        );
+
+        await dbRun(
+          db,
+          `INSERT INTO aggregated_metrics(date, metric, dimension, value)
+           SELECT substr(timestamp, 1, 10), event_type, '', COUNT(*)
+           FROM events
+           WHERE event_type != 'pageview' AND timestamp < ?
+           GROUP BY event_type, substr(timestamp, 1, 10)
+           ON CONFLICT(date, metric, dimension) DO UPDATE SET value = aggregated_metrics.value + excluded.value`,
+          [cutoff]
+        );
+
+        await dbRun(db, `DELETE FROM events WHERE timestamp < ?`, [cutoff]);
+        await dbRun(db, `DELETE FROM sessions WHERE last_seen_at < ?`, [cutoff]);
+        await dbRun(
+          db,
+          `DELETE FROM users
+           WHERE last_seen < ?
+             AND id NOT IN (SELECT DISTINCT user_id FROM events WHERE user_id IS NOT NULL)`,
+          [cutoff]
+        );
+        await dbRun(db, `DELETE FROM aggregated_metrics WHERE date < ?`, [rollupCutoff]);
+
+        await dbRun(db, 'COMMIT');
+      } catch (err) {
+        await dbRun(db, 'ROLLBACK');
+        throw err;
+      }
     },
 
     getPublicConfig(): MarpleConfig {

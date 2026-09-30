@@ -63,8 +63,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   ua           TEXT,
   is_active    INTEGER DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_ses_uid ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_ses_ts  ON sessions(started_at);
+CREATE INDEX IF NOT EXISTS idx_ses_uid       ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_ses_ts        ON sessions(started_at);
+CREATE INDEX IF NOT EXISTS idx_ses_last_seen ON sessions(last_seen_at);
 
 CREATE TABLE IF NOT EXISTS users (
   id          TEXT PRIMARY KEY,
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS users (
   device_type TEXT,
   properties  JSONB DEFAULT '{}'::jsonb
 );
+CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen);
 
 CREATE TABLE IF NOT EXISTS aggregated_metrics (
   id        SERIAL PRIMARY KEY,
@@ -108,6 +110,8 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
   for (const col of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content']) {
     try { await pool.query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS ${col} TEXT`); } catch {}
   }
+  try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_ses_last_seen ON sessions(last_seen_at)`); } catch {}
+  try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)`); } catch {}
 
   const storageObj: Driver = {
     async writeEvent(ev: TrackEvent): Promise<void> {
@@ -377,29 +381,48 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
 
     async runRollup(cfg?: RollupConfig): Promise<void> {
       const cutoffDays = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
-      const cutoff = cutoffDays(cfg?.keepRawEventsDays || 30);
-      
-      await pool.query(
-        `INSERT INTO aggregated_metrics(date,metric,dimension,value) 
-         SELECT TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD'), 'pageviews', '', COUNT(*) 
-         FROM events WHERE event_type='pageview' AND timestamp<$1 
-         GROUP BY TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD')
-         ON CONFLICT (date, metric, dimension) DO UPDATE SET value = EXCLUDED.value`,
-        [cutoff]
-      );
-      
-      await pool.query(
-        `INSERT INTO aggregated_metrics(date,metric,dimension,value) 
-         SELECT TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD'), event_type, '', COUNT(*) 
-         FROM events WHERE event_type!='pageview' AND timestamp<$1 
-         GROUP BY event_type, TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD')
-         ON CONFLICT (date, metric, dimension) DO UPDATE SET value = EXCLUDED.value`,
-        [cutoff]
-      );
-      
-      await pool.query(`DELETE FROM events WHERE timestamp<$1`, [cutoff]);
-      const rollupCutoff = cutoffDays(cfg?.keepRollupsDays || 365);
-      await pool.query(`DELETE FROM aggregated_metrics WHERE date<$1`, [rollupCutoff]);
+      const cutoff = cutoffDays(cfg?.keepRawEventsDays ?? 30);
+      const rollupCutoff = cutoffDays(cfg?.keepRollupsDays ?? 365);
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        await client.query(
+          `INSERT INTO aggregated_metrics(date, metric, dimension, value) 
+           SELECT TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD'), 'pageviews', '', COUNT(*) 
+           FROM events WHERE event_type = 'pageview' AND timestamp < $1 
+           GROUP BY TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD')
+           ON CONFLICT (date, metric, dimension) DO UPDATE SET value = aggregated_metrics.value + EXCLUDED.value`,
+          [cutoff]
+        );
+
+        await client.query(
+          `INSERT INTO aggregated_metrics(date, metric, dimension, value) 
+           SELECT TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD'), event_type, '', COUNT(*) 
+           FROM events WHERE event_type != 'pageview' AND timestamp < $1 
+           GROUP BY event_type, TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD')
+           ON CONFLICT (date, metric, dimension) DO UPDATE SET value = aggregated_metrics.value + EXCLUDED.value`,
+          [cutoff]
+        );
+
+        await client.query(`DELETE FROM events WHERE timestamp < $1`, [cutoff]);
+        await client.query(`DELETE FROM sessions WHERE last_seen_at < $1`, [cutoff]);
+        await client.query(
+          `DELETE FROM users
+           WHERE last_seen < $1
+             AND id NOT IN (SELECT DISTINCT user_id FROM events WHERE user_id IS NOT NULL)`,
+          [cutoff]
+        );
+        await client.query(`DELETE FROM aggregated_metrics WHERE date < $1`, [rollupCutoff]);
+
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
     },
 
     getPublicConfig(): MarpleConfig {
