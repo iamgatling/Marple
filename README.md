@@ -264,6 +264,28 @@ npx marple help    # Show usage
 
 ---
 
+## Proxy Configuration & Client IP Resolution
+
+Marple never trusts `X-Forwarded-For` headers by default. Direct peer IP addresses (`req.socket.remoteAddress`) are used for rate limiting and event persistence unless explicitly configured via `trustProxy`.
+
+```js
+await marple.init({
+  // Direct Node (default): ignores X-Forwarded-For to prevent IP spoofing
+  trustProxy: false,
+
+  // Single reverse proxy (e.g. Nginx, Heroku, AWS ALB):
+  // trustProxy: true, // or trustProxy: 1
+
+  // Multiple reverse proxies (e.g. Cloudflare -> Nginx -> Node):
+  // trustProxy: 2,
+
+  // Specific trusted proxy IP allowlist:
+  // trustProxy: ['127.0.0.1', '10.0.0.1']
+});
+```
+
+---
+
 ## Repository
 
 - **GitHub**: [github.com/iamgatling/Marple](https://github.com/iamgatling/Marple)
@@ -273,4 +295,3 @@ npx marple help    # Show usage
 ## License
 
 [MIT](LICENSE)
-u

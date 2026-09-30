@@ -112,6 +112,7 @@ export interface MarpleConfig {
   postgresConnectionString?: string;
   connectionString?: string;
   retention?: RollupConfig;
+  trustProxy?: boolean | number | string | string[];
   dev?: boolean;
   dashboardPath?: string;
   [key: string]: any;

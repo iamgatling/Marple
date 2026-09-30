@@ -6,6 +6,7 @@ import { isbot } from 'isbot';
 import { getPublicConfig } from './storage.js';
 import { Driver, MarpleConfig, TrackEvent, FunnelStep } from './types.js';
 import { validateIngestBatch, ValidationError, IngestEvent } from './validation.js';
+import { getClientIp } from './proxy.js';
 
 export type MarpleRequest = IncomingMessage & {
   body?: unknown;
@@ -22,40 +23,73 @@ export type MarpleResponse = ServerResponse & {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const collectRateLimitMap = new Map<string, number[]>();
-const COLLECT_RATE_LIMIT_MAX = 100;
-const COLLECT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+export interface RateLimitResult {
+  limited: boolean;
+  retryAfter: number;
+}
 
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const windowStart = now - COLLECT_RATE_LIMIT_WINDOW_MS;
+export class RateLimiter {
+  private map = new Map<string, number[]>();
+  private maxRequests: number;
+  private windowMs: number;
+  private maxKeys: number;
 
-  let timestamps = collectRateLimitMap.get(ip);
-  if (!timestamps) {
-    timestamps = [];
-  } else {
-    while (timestamps.length > 0 && timestamps[0] <= windowStart) {
-      timestamps.shift();
-    }
+  constructor(maxRequests = 100, windowMs = 60 * 1000, maxKeys = 5000) {
+    this.maxRequests = maxRequests;
+    this.windowMs = windowMs;
+    this.maxKeys = maxKeys;
   }
 
-  if (timestamps.length >= COLLECT_RATE_LIMIT_MAX) {
-    return true;
-  }
+  check(ip: string): RateLimitResult {
+    const now = Date.now();
+    const windowStart = now - this.windowMs;
 
-  timestamps.push(now);
-  collectRateLimitMap.set(ip, timestamps);
-
-  if (collectRateLimitMap.size > 1000) {
-    for (const [k, ts] of collectRateLimitMap.entries()) {
-      if (ts.length === 0 || ts[ts.length - 1] <= windowStart) {
-        collectRateLimitMap.delete(k);
+    let timestamps = this.map.get(ip);
+    if (!timestamps) {
+      timestamps = [];
+    } else {
+      while (timestamps.length > 0 && timestamps[0] <= windowStart) {
+        timestamps.shift();
       }
     }
+
+    if (timestamps.length >= this.maxRequests) {
+      const oldest = timestamps[0];
+      const retryAfter = Math.max(1, Math.ceil((oldest + this.windowMs - now) / 1000));
+      return { limited: true, retryAfter };
+    }
+
+    timestamps.push(now);
+    this.map.set(ip, timestamps);
+
+    if (this.map.size > this.maxKeys) {
+      for (const [k, ts] of this.map.entries()) {
+        if (ts.length === 0 || ts[ts.length - 1] <= windowStart) {
+          this.map.delete(k);
+        }
+        if (this.map.size <= this.maxKeys * 0.8) break;
+      }
+      if (this.map.size > this.maxKeys) {
+        for (const k of this.map.keys()) {
+          this.map.delete(k);
+          if (this.map.size <= this.maxKeys * 0.8) break;
+        }
+      }
+    }
+
+    return { limited: false, retryAfter: 0 };
   }
 
-  return false;
+  reset(): void {
+    this.map.clear();
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
 }
+
+const defaultRateLimiter = new RateLimiter();
 
 function sendSafe(
   res: MarpleResponse,
@@ -225,15 +259,24 @@ async function readJsonBody(
   });
 }
 
-async function handleCollect(req: MarpleRequest, res: MarpleResponse, storage: Driver): Promise<void> {
+async function handleCollect(
+  req: MarpleRequest,
+  res: MarpleResponse,
+  storage: Driver,
+  config?: MarpleConfig,
+  limiter: RateLimiter = defaultRateLimiter
+): Promise<void> {
   if (res.headersSent || res.writableEnded || res.destroyed) return;
 
   try {
-    const xff = req.headers['x-forwarded-for'];
-    const rawIp = (Array.isArray(xff) ? xff[0] : xff) || req.socket?.remoteAddress || '';
-    const ip = rawIp.split(',')[0].trim();
-    if (checkRateLimit(ip)) {
-      sendSafe(res, 429, 'Too Many Requests', { 'Content-Type': 'text/plain' });
+    const activeConfig = config || storage.config;
+    const ip = getClientIp(req, activeConfig);
+    const limit = limiter.check(ip);
+    if (limit.limited) {
+      sendSafe(res, 429, 'Too Many Requests', {
+        'Content-Type': 'text/plain',
+        'Retry-After': String(limit.retryAfter)
+      });
       return;
     }
 
@@ -365,6 +408,7 @@ export interface DashboardOptions {
 export function createDashboardMiddleware({ authenticate, storage, config }: DashboardOptions) {
   let dashboardHTML = getDashboardHTML();
   let clientSDK = getClientSDK();
+  const rateLimiter = new RateLimiter();
 
   return async function marpleMiddleware(req: MarpleRequest, res: MarpleResponse, next?: any) {
     if (config?.dev) {
@@ -379,7 +423,7 @@ export function createDashboardMiddleware({ authenticate, storage, config }: Das
     }
 
     if (rawPath === '/collect' || rawPath.endsWith('/marple/collect')) {
-      return handleCollect(req, res, storage);
+      return handleCollect(req, res, storage, config, rateLimiter);
     }
 
     let authed = false;
