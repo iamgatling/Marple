@@ -19,7 +19,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "marple": "./dist/cli.js"
+    "marple": "dist/cli.js"
   },
   "files": [
     "dist",
