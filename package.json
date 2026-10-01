@@ -38,7 +38,8 @@
   "scripts": {
     "build": "tsc && cp src/dashboard.html dist/dashboard.html && node scripts/build-cjs.js",
     "start": "node dist/cli.js",
-    "test": "npm run build && node --test tests/*.test.js"
+    "test": "npm run build && node --test tests/*.test.js",
+    "test:run": "node --test tests/*.test.js"
   },
   "dependencies": {
     "isbot": "^5.2.1"

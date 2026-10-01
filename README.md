@@ -375,6 +375,24 @@ Marple is designed to comply with privacy frameworks (such as GDPR and ePrivacy)
 
 ---
 
+## Development & Testing
+
+The test suite targets the compiled output in `dist/`, which is not committed to the repository. Always run `npm test` to build first and then execute the tests:
+
+```sh
+npm test
+```
+
+> [!IMPORTANT]
+> Running `node --test tests/*.test.js` directly (without a prior build) will fail with opaque file-level errors because `dist/` is absent. `npm test` handles the build automatically. Use `npm run test:run` only after a fresh `npm run build`.
+
+```sh
+# After an initial npm test or npm run build:
+npm run test:run
+```
+
+---
+
 ## Repository
 
 - **GitHub**: [github.com/iamgatling/Marple](https://github.com/iamgatling/Marple)
