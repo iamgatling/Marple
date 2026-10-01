@@ -153,7 +153,7 @@ export function normalizeDateRange(sinceInput?: string, untilInput?: string): Da
   };
 }
 
-export function getPublicConfig(config: Record<string, any> = {}): Record<string, any> {
+export function getPublicConfig(config: Record<string, unknown> = {}): Record<string, unknown> {
   if (!config || typeof config !== 'object') return {};
 
   const SENSITIVE_KEYS = new Set([
@@ -185,12 +185,12 @@ export function getPublicConfig(config: Record<string, any> = {}): Record<string
     return false;
   }
 
-  function clean(obj: any): any {
+  function clean(obj: unknown): unknown {
     if (Array.isArray(obj)) {
       return obj.map(clean);
     }
     if (obj && typeof obj === 'object' && obj.constructor === Object) {
-      const result: Record<string, any> = {};
+      const result: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(obj)) {
         if (!isSensitiveKey(k)) {
           result[k] = clean(v);
@@ -201,28 +201,29 @@ export function getPublicConfig(config: Record<string, any> = {}): Record<string
     return obj;
   }
 
-  return clean(config);
+  return clean(config) as Record<string, unknown>;
 }
 
-/**
- * Unified Driver Interface Contract expects drivers to return a Driver object.
- */
+function isDriver(val: unknown): val is Driver {
+  return typeof val === 'object' && val !== null && typeof (val as Driver).writeEvent === 'function';
+}
+
 export async function openStorage(config: MarpleConfig): Promise<Driver> {
-  // Branch A: Custom Direct Object
-  if (config.storage && typeof config.storage === 'object' && typeof (config.storage as any).writeEvent === 'function') {
-    const customDriver = config.storage as Driver;
+  if (config.storage && isDriver(config.storage)) {
+    const customDriver = config.storage;
     if (typeof customDriver.getPublicConfig !== 'function') {
       customDriver.getPublicConfig = function() {
-        return getPublicConfig(customDriver.config || config);
+        return getPublicConfig((customDriver.config || config) as Record<string, unknown>);
       };
     }
     return customDriver;
   }
 
-  // Branch B: config object with type or string
   const storageType = typeof config.storage === 'string'
     ? config.storage
-    : (typeof config.storage === 'object' && (config.storage as any)?.type ? (config.storage as any).type : 'sqlite');
+    : (typeof config.storage === 'object' && config.storage !== null && typeof (config.storage as { type?: unknown }).type === 'string'
+        ? (config.storage as { type: string }).type
+        : 'sqlite');
 
   if (storageType === 'postgres') {
     const { default: openPostgresStorage } = await import('./drivers/postgres.js');

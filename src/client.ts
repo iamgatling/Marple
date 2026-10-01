@@ -9,15 +9,15 @@ interface TrackEvent {
   user_id?: string | null;
   url?: string | null;
   referrer?: string | null;
-  properties?: Record<string, any>;
+  properties?: Record<string, unknown>;
   ip?: string | null;
   ua?: string | null;
   country?: string | null;
   timestamp?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
-(function (window: any) {
+(function (window: Window | typeof globalThis) {
   'use strict';
 
   const FLUSH_INTERVAL_MS = 10000;
@@ -32,26 +32,26 @@ interface TrackEvent {
 
   let _config: ClientConfig = { endpoint: '/marple/collect', sessionId: null, userId: null };
   const eventQueue: TrackEvent[] = [];
-  let _timer: any = null;
+  let _timer: ReturnType<typeof setInterval> | null = null;
   let _flushing = false;
 
-  // DNT and GPC Privacy Check
   function isDNTEnabled(): boolean {
-    const win = (typeof window !== 'undefined' ? window : {}) as any;
-    const nav = win.navigator || (typeof navigator !== 'undefined' ? navigator : null);
+    const win = typeof window !== 'undefined' ? window : null;
+    const nav = (win ? win.navigator : null) || (typeof navigator !== 'undefined' ? navigator : null);
     if (nav) {
-      const dnt = nav.doNotTrack || win.doNotTrack || nav.msDoNotTrack;
+      const navRec = nav as unknown as Record<string, unknown>;
+      const winRec = win as unknown as Record<string, unknown> | null;
+      const dnt = nav.doNotTrack || (winRec ? winRec.doNotTrack : null) || navRec.msDoNotTrack;
       if (dnt === '1' || dnt === 'yes' || dnt === 1 || dnt === true) {
         return true;
       }
-      if (nav.globalPrivacyControl === true || nav.globalPrivacyControl === '1' || nav.globalPrivacyControl === 1) {
+      if (navRec.globalPrivacyControl === true || navRec.globalPrivacyControl === '1' || navRec.globalPrivacyControl === 1) {
         return true;
       }
     }
     return false;
   }
 
-  // Session ID
   function getOrCreateSession(): string {
     let sid = sessionStorage.getItem('_marple_sid');
     if (!sid) {
@@ -61,7 +61,6 @@ interface TrackEvent {
     return sid;
   }
 
-  // Flush
   function flush(useBeacon?: boolean): void {
     if (isDNTEnabled() || _flushing || !eventQueue.length) return;
     _flushing = true;
@@ -76,8 +75,7 @@ interface TrackEvent {
     setTimeout(() => { _flushing = false; }, 200);
   }
 
-  // Track
-  function track(eventType: string, properties?: Record<string, any>): void {
+  function track(eventType: string, properties?: Record<string, unknown>): void {
     if (isDNTEnabled()) return;
     eventQueue.push({
       event_type: eventType,
@@ -91,21 +89,20 @@ interface TrackEvent {
     if (eventQueue.length >= MAX_QUEUE) flush(false);
   }
 
-  // Auto page-view tracking
   function trackPageview(): void {
     track('pageview', { title: document.title });
   }
 
-  // SPA history patching 
   function patchHistory(): void {
-    if ((history as any).__marple_patched__) return;
-    (history as any).__marple_patched__ = true;
-    const wrap = (orig: any) => function (this: any, ...args: any[]) {
-      const result = orig.apply(this, args);
+    const hist = history as unknown as Record<string, unknown>;
+    if (hist.__marple_patched__) return;
+    hist.__marple_patched__ = true;
+    const origPushState = history.pushState;
+    history.pushState = function (this: History, ...args: Parameters<typeof origPushState>) {
+      const result = origPushState.apply(this, args);
       trackPageview();
       return result;
     };
-    history.pushState = wrap(history.pushState);
     window.addEventListener('popstate', trackPageview);
   }
 
@@ -120,11 +117,11 @@ interface TrackEvent {
     return null;
   }
 
-  // Auto-tracking link clicks & file downloads
   function setupAutotracking(): void {
     if (typeof window === 'undefined' || typeof document === 'undefined') return;
-    if ((window as any).__marple_autotrack_setup__) return;
-    (window as any).__marple_autotrack_setup__ = true;
+    const win = window as unknown as Record<string, unknown>;
+    if (win.__marple_autotrack_setup__) return;
+    win.__marple_autotrack_setup__ = true;
 
     document.addEventListener('click', (event: MouseEvent) => {
       try {
@@ -139,10 +136,8 @@ interface TrackEvent {
         const href = anchor.href;
         if (href.indexOf('javascript:') === 0) return;
 
-        // Check if file download
         const isDownload = anchor.hasAttribute('download') || DOWNLOAD_EXT_REGEX.test(href);
 
-        // Check if external link
         let isExternal = false;
         if (anchor.hostname && window.location && window.location.hostname) {
           isExternal = anchor.hostname !== window.location.hostname;
@@ -168,26 +163,21 @@ interface TrackEvent {
           });
         }
       } catch (e) {
-        // Prevent breaking host app handlers
       }
     }, true);
   }
 
-  // Init 
   function init(options?: Partial<ClientConfig>): void {
     _config = { ..._config, ...options };
     _config.sessionId = _config.sessionId || getOrCreateSession();
     _config.userId = _config.userId || localStorage.getItem('_marple_uid') || null;
 
-    // Auto page-view & autotracking
     trackPageview();
     patchHistory();
     setupAutotracking();
 
-    // Interval flush
     _timer = setInterval(() => flush(false), FLUSH_INTERVAL_MS);
 
-    // Flush on tab close
     window.addEventListener('pagehide', () => flush(true));
     window.addEventListener('beforeunload', () => flush(true));
     window.addEventListener('visibilitychange', () => {
@@ -195,13 +185,12 @@ interface TrackEvent {
     });
   }
 
-  // Identify
-  function identify(userId: string, traits?: Record<string, any>): void {
+  function identify(userId: string, traits?: Record<string, unknown>): void {
     _config.userId = userId;
     localStorage.setItem('_marple_uid', userId);
     track('identify', traits || {});
   }
 
-  window.Marple = { init, track, identify };
+  (window as unknown as Record<string, unknown>).Marple = { init, track, identify };
 })(typeof window !== 'undefined' ? window : globalThis);
 

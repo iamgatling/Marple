@@ -2,13 +2,17 @@ import path from 'path';
 import { existsSync } from 'fs';
 import { pathToFileURL } from 'url';
 import { openStorage } from './storage.js';
-import { createDashboardMiddleware } from './dashboard.js';
+import { createDashboardMiddleware, MarpleRequest, MarpleResponse } from './dashboard.js';
 import { Driver, MarpleConfig, TrackEvent, RollupConfig } from './types.js';
 
 export * from './types.js';
 
 let _storage: Driver | null = null;
 let _config: MarpleConfig | null = null;
+
+function isDriver(storage: unknown): storage is Driver {
+  return typeof storage === 'object' && storage !== null && typeof (storage as Driver).writeEvent === 'function';
+}
 
 function validateRetentionConfig(retention?: RollupConfig): void {
   if (!retention) return;
@@ -49,22 +53,24 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MarpleCon
         const fileUrl = pathToFileURL(fullPath).href;
         const mod = await import(fileUrl);
         return (mod.default || mod) as MarpleConfig;
-      } catch (err: any) {
-        throw new Error(`[Marple] Failed to load configuration from ${fullPath}: ${err.message}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(`[Marple] Failed to load configuration from ${fullPath}: ${msg}`);
       }
     }
   }
   return null;
 }
 
-export async function init(options: MarpleConfig = {}): Promise<{ config: MarpleConfig; storage: Driver }> {
-  validateConfig(options);
+export async function init(options?: MarpleConfig): Promise<{ config: MarpleConfig; storage: Driver }> {
+  const hasExplicitOptions = options !== undefined && Object.keys(options).length > 0;
+  if (options) {
+    validateConfig(options);
+  }
 
   let fileConfig: MarpleConfig | null = null;
-  try {
+  if (!hasExplicitOptions) {
     fileConfig = await loadConfig();
-  } catch (err) {
-    throw err;
   }
 
   const defaults: MarpleConfig = {
@@ -75,18 +81,18 @@ export async function init(options: MarpleConfig = {}): Promise<{ config: Marple
   _config = {
     ...defaults,
     ...(fileConfig || {}),
-    ...options,
+    ...(options || {}),
     retention: {
       ...defaults.retention,
       ...(fileConfig?.retention || {}),
-      ...(options.retention || {})
+      ...(options?.retention || {})
     }
   };
 
   validateConfig(_config);
 
-  if (typeof _config.storage === 'object' && typeof (_config.storage as any).writeEvent === 'function') {
-    _storage = _config.storage as Driver;
+  if (isDriver(_config.storage)) {
+    _storage = _config.storage;
   } else {
     _storage = await openStorage(_config);
   }
@@ -102,7 +108,9 @@ export async function init(options: MarpleConfig = {}): Promise<{ config: Marple
   return { config: _config, storage: _storage };
 }
 
-export function dashboard(options: { authenticate: (req: any) => boolean | Promise<boolean> } = {} as any): any {
+export function dashboard(options: {
+  authenticate: (req: MarpleRequest) => boolean | Promise<boolean>;
+}): (req: MarpleRequest, res: MarpleResponse, next?: () => void) => void | Promise<void> {
   if (!options || !options.authenticate) {
     throw new Error('[Marple] dashboard() requires a mandatory authenticate(req) option.');
   }
@@ -112,7 +120,21 @@ export function dashboard(options: { authenticate: (req: any) => boolean | Promi
   return createDashboardMiddleware({ authenticate: options.authenticate, storage: _storage, config: _config });
 }
 
-export async function track(eventName: string, properties: Record<string, any> = {}, context: any = {}): Promise<void> {
+export interface TrackContext {
+  sessionId?: string | null;
+  userId?: string | null;
+  url?: string | null;
+  referrer?: string | null;
+  ip?: string | null;
+  ua?: string | null;
+  country?: string | null;
+}
+
+export async function track(
+  eventName: string,
+  properties: Record<string, unknown> = {},
+  context: TrackContext = {}
+): Promise<void> {
   if (typeof eventName !== 'string' || !eventName.trim()) {
     throw new Error('[Marple] track() requires a valid string eventName.');
   }

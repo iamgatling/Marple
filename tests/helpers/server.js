@@ -7,6 +7,7 @@ export function createTestServer(app) {
 
     server.on('connection', (socket) => {
       sockets.add(socket);
+      socket.on('error', () => {});
       socket.on('close', () => sockets.delete(socket));
     });
 

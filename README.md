@@ -287,7 +287,7 @@ npx marple help    # Show usage
 
 ## Configuration
 
-Options can be passed directly to `marple.init(options)`, imported from `marple.config.js`, or loaded automatically when calling `marple.init()`:
+Options can be passed directly to `marple.init(options)`, imported from `marple.config.js`, or loaded automatically when calling `marple.init()` without arguments:
 
 ```js
 // marple.config.js
@@ -302,7 +302,7 @@ export default {
 };
 ```
 
-You can also explicitly load configuration using `await marple.loadConfig()`.
+To avoid unexpected code execution from `process.cwd()`, `marple.init()` only loads `marple.config.js` if no explicit configuration is provided. You can also explicitly load configuration using `await marple.loadConfig()`.
 
 ---
 
@@ -316,15 +316,19 @@ await marple.init({
   trustProxy: false,
 
   // Single reverse proxy (e.g. Nginx, Heroku, AWS ALB):
+  // Note: numeric hop counts assume network topology guarantees the peer is a trusted proxy.
   // trustProxy: true, // or trustProxy: 1
 
   // Multiple reverse proxies (e.g. Cloudflare -> Nginx -> Node):
   // trustProxy: 2,
 
-  // Specific trusted proxy IP allowlist:
-  // trustProxy: ['127.0.0.1', '10.0.0.1']
+  // Specific trusted proxy IP / CIDR subnet allowlist:
+  // Supports IPv4/IPv6 addresses and CIDR notation (e.g. subnets):
+  // trustProxy: ['127.0.0.1', '10.0.0.0/8', '172.16.0.0/12', '2001:db8::/32']
 });
 ```
+
+> **Security Note on Numeric Hop Counts**: A numeric `trustProxy` setting (such as `1` or `2`) relies on the upstream network architecture ensuring that connections only arrive from your trusted reverse proxies. If your Node process is directly accessible by public clients, use an IP/CIDR allowlist mode instead to verify the direct peer socket address.
 
 ---
 
@@ -342,10 +346,13 @@ Marple is designed to comply with privacy frameworks (such as GDPR and ePrivacy)
 
 ---
 
-## Security & Boundary Safeguards
+## Security & Trust Boundaries
 
-- **Bounded Stream Parsing**: The `/collect` ingestion endpoint bounds raw incoming chunks and terminates parsing with `413 Payload Too Large` if requests exceed 64 KB, safely handling aborted streams and preventing memory exhaustion.
-- **Strict Ingestion Schema**: All event properties are validated against size and depth constraints (maximum 50 events per batch, property recursion depth limit of 3, key count limit of 64). Malformed items or invalid structures return `400 Bad Request`.
+- **Identity & Attribution Boundaries**: Client-provided `user_id` and `session_id` are unauthenticated browser tokens (pseudonymous client-controlled labels), NOT verified identities. They are subject to strict shape and length validation, but must never be used as trusted credentials or access control tokens.
+- **Server-Derived Geolocation**: Ingestion checks for trusted reverse proxy geolocation headers (`cf-ipcountry`, `x-country-code`, `cloudfront-viewer-country`) and prioritizes them over unauthenticated client-reported country values.
+- **Bounded Stream Parsing**: The `/collect` ingestion endpoint bounds raw incoming chunks and terminates parsing with `413 Payload Too Large` if requests exceed 64 KB, safely handling aborted streams, unconsumed buffers, and preventing memory exhaustion.
+- **Safe Public Error Boundaries**: Internal exception messages, storage failures, and database queries are never leaked to public or unauthenticated callers. Errors are returned as stable, typed codes (`BAD_REQUEST`, `INVALID_PAYLOAD`, `INVALID_STEPS`, `FUNNEL_ERROR`, `INTERNAL_ERROR`).
+- **Strict Ingestion Schema**: All event properties are validated against size and depth constraints (maximum 50 events per batch, property recursion depth limit of 3, key count limit of 50, serialized size limit of 16 KB). Malformed items or invalid structures return `400 Bad Request`.
 - **HTTP Method Enforcement**: Endpoints strictly enforce allowable HTTP methods. `/collect` and `/api/funnel` accept only `POST`; dashboard and other API endpoints accept only `GET` and `HEAD`. Any unauthorized method receives `405 Method Not Allowed` with an appropriate `Allow` response header.
 - **Security Headers**: Standard security headers are returned on all responses:
   - `X-Content-Type-Options: nosniff`
@@ -360,10 +367,10 @@ Marple is designed to comply with privacy frameworks (such as GDPR and ePrivacy)
 ### Upgrading to 2.3.0+
 
 - **Dual Module Output**: Marple exports both CommonJS (`main`: `./dist/cjs/index.js`) and ESM (`module`: `./dist/index.js`) via package `exports`. `require('marple')` and `require('marple/client')` work out-of-the-box without requiring experimental Node flags.
-- **Startup Data Rollups**: If `retention` is configured, automatic rollup is enabled by default (`autoRollup: true`). During `marple.init()`, old raw events, stale sessions, and orphaned users are pruned. Set `autoRollup: false` if you run rollups in a separate worker process.
-- **Reverse Proxy Configurations**: By default, `trustProxy` is `false`. If Marple is deployed behind a reverse proxy (e.g. Nginx, Cloudflare, AWS ALB), configure `trustProxy: true` (or the hop count) in your `marple.init()` options so rate limiting and persistence resolve the genuine client IP address.
-- **Strict Funnel Analysis**: Funnel steps are now evaluated in chronological order within each session. Events matching prior steps later in time will not erroneously match earlier steps. Date ranges (`since` and `until`) are validated and applied across all funnel steps.
-- **Generated Configuration Auto-Loading**: `marple.init()` automatically checks for and loads `marple.config.js` in the current working directory if no options are passed directly.
+- **Startup Data Rollups**: If `retention` is configured, automatic rollup is enabled by default (`autoRollup: true`). During `marple.init()`, old raw events, stale sessions, and orphaned users are pruned within a single atomic transaction. Set `autoRollup: false` if you run rollups in a separate worker process.
+- **Reverse Proxy Configurations**: By default, `trustProxy` is `false`. If Marple is deployed behind a reverse proxy (e.g. Nginx, Cloudflare, AWS ALB), configure `trustProxy: true` (or an explicit IP / CIDR allowlist) in your `marple.init()` options so rate limiting and persistence resolve the genuine client IP address.
+- **Strict Funnel Analysis**: Funnel steps are evaluated in chronological order within each session. Events matching prior steps later in time will not erroneously match earlier steps. Date ranges (`since` and `until`) are validated and applied across all funnel steps.
+- **Generated Configuration Auto-Loading**: `marple.init()` automatically checks for and loads `marple.config.js` in the current working directory only when no explicit options are passed directly.
 
 ---
 

@@ -7,19 +7,6 @@ import { createTestServer } from './helpers/server.js';
 import { makeRequest } from './helpers/request.js';
 import { createTempDbPath, cleanupDb } from './helpers/db.js';
 
-// Import companion test suites so node --test tests/index.test.js runs everything
-import './contracts.test.js';
-import './collect-body.test.js';
-import './validation.test.js';
-import './proxy.test.js';
-import './retention.test.js';
-import './funnel.test.js';
-import './config.test.js';
-import './package-cjs.test.js';
-import './routes-hardening.test.js';
-import './mask-ip.test.js';
-import './regressions.test.js';
-
 describe('Marple Core & Middleware Test Suite', () => {
   const mockStorage = () => {
     const events = [];

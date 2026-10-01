@@ -76,6 +76,26 @@ describe('Proxy Trust & Client IP Resolution', () => {
       };
       assert.strictEqual(getClientIp(req, { trustProxy: 1 }), '10.0.0.1');
     });
+
+    test('trusted CIDR subnet resolves client IP and rejects untrusted peer outside subnet', () => {
+      const trustedReq = {
+        headers: { 'x-forwarded-for': '203.0.113.195' },
+        socket: { remoteAddress: '10.240.0.5' }
+      };
+      assert.strictEqual(getClientIp(trustedReq, { trustProxy: ['10.0.0.0/8'] }), '203.0.113.195');
+
+      const untrustedReq = {
+        headers: { 'x-forwarded-for': '203.0.113.195' },
+        socket: { remoteAddress: '192.168.1.100' }
+      };
+      assert.strictEqual(getClientIp(untrustedReq, { trustProxy: ['10.0.0.0/8'] }), '192.168.1.100');
+
+      const ipv6CidrReq = {
+        headers: { 'x-forwarded-for': '203.0.113.195' },
+        socket: { remoteAddress: '2001:db8:abcd::1' }
+      };
+      assert.strictEqual(getClientIp(ipv6CidrReq, { trustProxy: ['2001:db8::/32'] }), '203.0.113.195');
+    });
   });
 
   describe('Integration: Rate Limiting & Bounding', () => {

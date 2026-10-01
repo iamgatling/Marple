@@ -1,6 +1,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert';
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import express from 'express';
 import { createDashboardMiddleware } from '../dist/dashboard.js';
 import { createTestServer } from './helpers/server.js';
@@ -234,5 +235,66 @@ describe('/collect Body Handling Safety & Boundaries', () => {
       assert(res.body.includes('Payload Too Large'));
     }
     assert.strictEqual(writtenEvents.length, 0);
+  });
+
+  test('11. Separate child process server does not crash on oversized multi-chunk requests', async () => {
+    const childScript = `
+      import express from 'express';
+      import { createDashboardMiddleware } from './dist/dashboard.js';
+
+      const app = express();
+      const mockStorage = {
+        writeEvent: async () => {},
+        config: {}
+      };
+      app.use(createDashboardMiddleware({
+        authenticate: () => true,
+        storage: mockStorage,
+        config: {}
+      }));
+      const server = app.listen(0, '127.0.0.1', () => {
+        console.log('PORT:' + server.address().port);
+      });
+    `;
+
+    const child = spawn('node', ['--input-type=module', '-e', childScript], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    let childExited = false;
+    child.on('exit', () => {
+      childExited = true;
+    });
+
+    const port = await new Promise((resolve, reject) => {
+      let buf = '';
+      child.stdout.on('data', (d) => {
+        buf += d.toString();
+        const match = buf.match(/PORT:(\d+)/);
+        if (match) resolve(parseInt(match[1], 10));
+      });
+      child.on('error', reject);
+      setTimeout(() => reject(new Error('Child process server timeout')), 5000);
+    });
+
+    try {
+      const oversizedBody = Buffer.alloc(80 * 1024, 'x');
+      const res = await sendChunkedRequest(`http://127.0.0.1:${port}/collect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        chunks: [oversizedBody]
+      });
+
+      assert.strictEqual(res.status, 413);
+      assert(res.body.includes('Payload Too Large'));
+      assert.strictEqual(childExited, false);
+
+      const healthRes = await makeRequest(`http://127.0.0.1:${port}/client.js`);
+      assert.strictEqual(healthRes.status, 200);
+      assert.strictEqual(childExited, false);
+    } finally {
+      child.kill('SIGTERM');
+    }
   });
 });

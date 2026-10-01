@@ -319,6 +319,9 @@ async function handleCollect(
         'Content-Type': 'text/plain',
         'Connection': 'close'
       });
+      if (!req.destroyed && typeof req.destroy === 'function') {
+        req.destroy();
+      }
       return;
     }
 
@@ -338,21 +341,24 @@ async function handleCollect(
       return;
     }
 
+    const rawCountry = req.headers['cf-ipcountry'] || req.headers['x-country-code'] || req.headers['cloudfront-viewer-country'];
+    const serverCountry = typeof rawCountry === 'string' && rawCountry.trim().length <= 16 ? rawCountry.trim().toUpperCase() : null;
+
     const serverTimestamp = new Date().toISOString();
     for (const ev of validatedEvents) {
       const sanitizedEvent: TrackEvent = {
         ...ev,
         ip,
         ua,
+        country: serverCountry || ev.country || null,
         timestamp: serverTimestamp
       };
       await storage.writeEvent(sanitizedEvent);
     }
 
     sendSafe(res, 204);
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : 'Bad Request';
-    sendSafe(res, 400, JSON.stringify({ error: message }), {
+  } catch {
+    sendSafe(res, 400, JSON.stringify({ error: 'Bad Request', code: 'BAD_REQUEST' }), {
       'Content-Type': 'application/json'
     });
   }
@@ -375,11 +381,11 @@ async function handleApi(subPath: string, req: MarpleRequest, res: MarpleRespons
         return sendError(405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED', { 'Allow': 'POST' });
       }
       const { data: bodyData } = await readJsonBody(req, 8192);
-      const { steps, since, until } = (bodyData || {}) as {
-        steps?: FunnelStep[];
-        since?: string;
-        until?: string;
-      };
+      if (!bodyData || typeof bodyData !== 'object' || Array.isArray(bodyData)) {
+        return sendError(400, 'Invalid request body', 'INVALID_BODY');
+      }
+      const rawBody = bodyData as Record<string, unknown>;
+      const { steps, since, until } = rawBody;
 
       if (!steps || !Array.isArray(steps)) {
         return sendError(400, 'Funnel requires an array of steps', 'INVALID_STEPS');
@@ -387,22 +393,40 @@ async function handleApi(subPath: string, req: MarpleRequest, res: MarpleRespons
       if (steps.length === 0) {
         return send([]);
       }
+      const normalizedSteps: FunnelStep[] = [];
       for (const step of steps) {
-        if (!step || typeof step !== 'object') {
+        if (!step || typeof step !== 'object' || Array.isArray(step)) {
           return sendError(400, 'Invalid funnel step', 'INVALID_STEP');
         }
         const s = step as Record<string, unknown>;
-        const stepVal = typeof s.value === 'string' ? s.value : typeof s.name === 'string' ? s.name : undefined;
-        if (stepVal !== undefined && typeof stepVal !== 'string') {
+        const rawVal = typeof s.value === 'string' ? s.value : typeof s.name === 'string' ? s.name : undefined;
+        if (!rawVal || typeof rawVal !== 'string' || rawVal.trim().length === 0 || rawVal.length > 256) {
           return sendError(400, 'Invalid funnel step', 'INVALID_STEP');
         }
-        if (typeof stepVal === 'string' && stepVal.length > 256) {
-          return sendError(400, 'Invalid funnel step', 'INVALID_STEP');
-        }
+        normalizedSteps.push({
+          label: typeof s.label === 'string' ? s.label : undefined,
+          name: typeof s.name === 'string' ? s.name : rawVal,
+          value: rawVal,
+          type: typeof s.type === 'string' ? s.type : undefined
+        });
       }
 
-      const effectiveSince = since !== undefined ? since : params.since;
-      const effectiveUntil = until !== undefined ? until : params.until;
+      let effectiveSince: string | undefined;
+      let effectiveUntil: string | undefined;
+
+      if (since !== undefined) {
+        if (typeof since !== 'string') return sendError(400, 'Invalid "since" parameter', 'INVALID_DATE');
+        effectiveSince = since;
+      } else if (params.since !== undefined) {
+        effectiveSince = params.since;
+      }
+
+      if (until !== undefined) {
+        if (typeof until !== 'string') return sendError(400, 'Invalid "until" parameter', 'INVALID_DATE');
+        effectiveUntil = until;
+      } else if (params.until !== undefined) {
+        effectiveUntil = params.until;
+      }
 
       if (effectiveSince && isNaN(new Date(effectiveSince).getTime())) {
         return sendError(400, 'Invalid "since" date range', 'INVALID_DATE');
@@ -415,11 +439,10 @@ async function handleApi(subPath: string, req: MarpleRequest, res: MarpleRespons
       }
 
       try {
-        const results = await storage.getFunnel(steps, { since: effectiveSince, until: effectiveUntil });
+        const results = await storage.getFunnel(normalizedSteps, { since: effectiveSince, until: effectiveUntil });
         return send(results);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Funnel error';
-        return sendError(400, message, 'FUNNEL_ERROR');
+      } catch {
+        return sendError(500, 'Failed to compute funnel', 'FUNNEL_ERROR');
       }
     }
 
@@ -492,9 +515,8 @@ async function handleApi(subPath: string, req: MarpleRequest, res: MarpleRespons
     }
 
     sendError(404, 'Not found', 'NOT_FOUND');
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : 'Internal Server Error';
-    sendError(500, message, 'INTERNAL_ERROR');
+  } catch {
+    sendError(500, 'Internal Server Error', 'INTERNAL_ERROR');
   }
 }
 

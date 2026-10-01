@@ -101,14 +101,27 @@ CREATE TABLE IF NOT EXISTS aggregated_metrics (
 CREATE INDEX IF NOT EXISTS idx_agg_date ON aggregated_metrics(date);
 `;
 
-function dbAll<T = any>(db: any, sql: string, p: unknown[] = []): Promise<T[]> {
-  return new Promise((res, rej) => db.all(sql, p, (e: Error | null, r: T[]) => e ? rej(e) : res(r || [])));
+interface SqliteRunResult {
+  lastID: number;
+  changes: number;
 }
-function dbGet<T = any>(db: any, sql: string, p: unknown[] = []): Promise<T | null> {
-  return new Promise((res, rej) => db.get(sql, p, (e: Error | null, r: T) => e ? rej(e) : res(r || null)));
+
+interface SqliteDatabase {
+  all(sql: string, params: unknown[], callback: (err: Error | null, rows: unknown[]) => void): void;
+  get(sql: string, params: unknown[], callback: (err: Error | null, row: unknown) => void): void;
+  run(sql: string, params: unknown[], callback: (this: SqliteRunResult, err: Error | null) => void): void;
+  exec(sql: string, callback?: (err: Error | null) => void): void;
+  close(callback?: (err: Error | null) => void): void;
 }
-function dbRun(db: any, sql: string, p: unknown[] = []): Promise<{ lastID: number; changes: number }> {
-  return new Promise((res, rej) => db.run(sql, p, function(this: any, e: Error | null) { e ? rej(e) : res(this); }));
+
+function dbAll<T = unknown>(db: SqliteDatabase, sql: string, p: unknown[] = []): Promise<T[]> {
+  return new Promise((res, rej) => db.all(sql, p, (e: Error | null, r: unknown[]) => e ? rej(e) : res((r as T[]) || [])));
+}
+function dbGet<T = unknown>(db: SqliteDatabase, sql: string, p: unknown[] = []): Promise<T | null> {
+  return new Promise((res, rej) => db.get(sql, p, (e: Error | null, r: unknown) => e ? rej(e) : res((r as T) || null)));
+}
+function dbRun(db: SqliteDatabase, sql: string, p: unknown[] = []): Promise<SqliteRunResult> {
+  return new Promise((res, rej) => db.run(sql, p, function(this: SqliteRunResult, e: Error | null) { e ? rej(e) : res(this); }));
 }
 
 export default async function openSqliteStorage(config: MarpleConfig): Promise<Driver> {
@@ -173,16 +186,16 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       const targetGoal = options.goal || options.targetGoal;
 
       const [totals, prevTotals, active, topPages, topReferrers, browsers, devices, countries, dailyViews, availGoals] = await Promise.all([
-        dbGet(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=? AND timestamp<=?`, [since, until]),
-        dbGet(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=? AND timestamp<?`, [prevSince, prevUntil]),
-        dbGet(db, `SELECT COUNT(*) as n FROM sessions WHERE last_seen_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-5 minutes')`),
-        dbAll(db, `SELECT url as page, COUNT(*) as views FROM events WHERE event_type='pageview' AND url IS NOT NULL AND timestamp>=? AND timestamp<=? GROUP BY url ORDER BY views DESC LIMIT 10`, [since, until]),
-        dbAll(db, `SELECT referrer, COUNT(*) as count FROM events WHERE referrer IS NOT NULL AND referrer!='' AND timestamp>=? AND timestamp<=? GROUP BY referrer ORDER BY count DESC LIMIT 10`, [since, until]),
-        dbAll(db, `SELECT browser, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND browser IS NOT NULL GROUP BY browser ORDER BY count DESC`, [since, until]),
-        dbAll(db, `SELECT device_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND device_type IS NOT NULL GROUP BY device_type ORDER BY count DESC`, [since, until]),
-        dbAll(db, `SELECT country, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND country IS NOT NULL AND country!='' GROUP BY country ORDER BY count DESC LIMIT 10`, [since, until]),
-        dbAll(db, `SELECT substr(timestamp,1,10) as date, COUNT(*) as views FROM events WHERE event_type='pageview' AND timestamp>=? AND timestamp<=? GROUP BY date ORDER BY date ASC`, [since, until]),
-        dbAll(db, `SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=? AND timestamp<=?`, [since, until]),
+        dbGet<{ te: number; us: number; uu: number }>(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=? AND timestamp<=?`, [since, until]),
+        dbGet<{ te: number; us: number; uu: number }>(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=? AND timestamp<?`, [prevSince, prevUntil]),
+        dbGet<{ n: number }>(db, `SELECT COUNT(*) as n FROM sessions WHERE last_seen_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-5 minutes')`),
+        dbAll<{ page: string; views: number }>(db, `SELECT url as page, COUNT(*) as views FROM events WHERE event_type='pageview' AND url IS NOT NULL AND timestamp>=? AND timestamp<=? GROUP BY url ORDER BY views DESC LIMIT 10`, [since, until]),
+        dbAll<{ referrer: string; count: number }>(db, `SELECT referrer, COUNT(*) as count FROM events WHERE referrer IS NOT NULL AND referrer!='' AND timestamp>=? AND timestamp<=? GROUP BY referrer ORDER BY count DESC LIMIT 10`, [since, until]),
+        dbAll<{ browser: string; count: number }>(db, `SELECT browser, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND browser IS NOT NULL GROUP BY browser ORDER BY count DESC`, [since, until]),
+        dbAll<{ device_type: string; count: number }>(db, `SELECT device_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND device_type IS NOT NULL GROUP BY device_type ORDER BY count DESC`, [since, until]),
+        dbAll<{ country: string; count: number }>(db, `SELECT country, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND country IS NOT NULL AND country!='' GROUP BY country ORDER BY count DESC LIMIT 10`, [since, until]),
+        dbAll<{ date: string; views: number }>(db, `SELECT substr(timestamp,1,10) as date, COUNT(*) as views FROM events WHERE event_type='pageview' AND timestamp>=? AND timestamp<=? GROUP BY date ORDER BY date ASC`, [since, until]),
+        dbAll<{ event_type: string }>(db, `SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=? AND timestamp<=?`, [since, until]),
       ]);
 
       const availableGoals = (availGoals as Array<{ event_type: string }>).map(r => r.event_type);
@@ -218,16 +231,16 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       const targetGoal = options.goal || options.targetGoal;
 
       const [totalSessionsRow, prevTotalSessionsRow] = await Promise.all([
-        dbGet(db, `SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=? AND timestamp<=?`, [since, until]),
-        dbGet(db, `SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=? AND timestamp<?`, [prevSince, prevUntil])
+        dbGet<{ us: number }>(db, `SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=? AND timestamp<=?`, [since, until]),
+        dbGet<{ us: number }>(db, `SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=? AND timestamp<?`, [prevSince, prevUntil])
       ]);
       const totalSessions = totalSessionsRow?.us || 1;
       const prevTotalSessions = prevTotalSessionsRow?.us || 1;
 
       async function calculateGoal(goalName: string): Promise<GoalConversionData> {
         const [currGoal, prevGoal] = await Promise.all([
-          dbGet(db, `SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=? AND timestamp>=? AND timestamp<=?`, [goalName, since, until]),
-          dbGet(db, `SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=? AND timestamp>=? AND timestamp<?`, [goalName, prevSince, prevUntil])
+          dbGet<{ count: number; uu: number; us: number }>(db, `SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=? AND timestamp>=? AND timestamp<=?`, [goalName, since, until]),
+          dbGet<{ count: number; uu: number; us: number }>(db, `SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=? AND timestamp>=? AND timestamp<?`, [goalName, prevSince, prevUntil])
         ]);
         const count = currGoal?.count || 0;
         const uniqueUsers = currGoal?.uu || 0;
@@ -390,7 +403,7 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
 
       const selectCols = steps.map((_, i) => `(SELECT COUNT(*) FROM step_${i}) as c_${i}`).join(', ');
       const sql = `WITH ${cteClauses.join(', ')} SELECT ${selectCols}`;
-      const row = await dbGet(db, sql, params);
+      const row = await dbGet<Record<string, unknown>>(db, sql, params);
 
       let prevCount: number | null = null;
       const results: FunnelStepResult[] = [];

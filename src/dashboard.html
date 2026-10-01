@@ -789,7 +789,7 @@
         for (const w of weeks) {
           const rows = cohortsData.filter(d => d.cohort_week === w);
           const size = rows[0]?.cohort_size || 0;
-          bodyHtml += `<tr><td>${w}</td><td>${size}</td>`;
+          bodyHtml += `<tr><td>${esc(String(w))}</td><td>${esc(String(size))}</td>`;
           for(let i=0; i<=maxWeek; i++) {
             const match = rows.find(r => r.week_num === i);
             if (!match || size === 0) {
