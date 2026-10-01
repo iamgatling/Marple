@@ -360,8 +360,38 @@ async function handleApi(subPath: string, req: MarpleRequest, res: MarpleRespons
 
     if (subPath === '/funnel') {
       const { data: bodyData } = await readJsonBody(req, 8192);
-      const { steps } = (bodyData || {}) as { steps: FunnelStep[] };
-      return send(await storage.getFunnel(steps));
+      const { steps, since, until } = (bodyData || {}) as {
+        steps?: FunnelStep[];
+        since?: string;
+        until?: string;
+      };
+
+      if (!steps || !Array.isArray(steps)) {
+        return send({ error: 'Funnel requires an array of steps' }, 400);
+      }
+      if (steps.length === 0) {
+        return send([]);
+      }
+
+      const effectiveSince = since !== undefined ? since : params.since;
+      const effectiveUntil = until !== undefined ? until : params.until;
+
+      if (effectiveSince && isNaN(new Date(effectiveSince).getTime())) {
+        return send({ error: 'Invalid "since" date range' }, 400);
+      }
+      if (effectiveUntil && isNaN(new Date(effectiveUntil).getTime())) {
+        return send({ error: 'Invalid "until" date range' }, 400);
+      }
+      if (effectiveSince && effectiveUntil && new Date(effectiveSince).getTime() > new Date(effectiveUntil).getTime()) {
+        return send({ error: '"since" must be earlier than or equal to "until"' }, 400);
+      }
+
+      try {
+        const results = await storage.getFunnel(steps, { since: effectiveSince, until: effectiveUntil });
+        return send(results);
+      } catch (err: any) {
+        return send({ error: err.message }, 400);
+      }
     }
 
     send({ error: 'Not found' }, 404);

@@ -100,6 +100,11 @@ export interface FunnelStepResult {
   dropoff: number;
 }
 
+export interface FunnelOptions {
+  since?: string;
+  until?: string;
+}
+
 export interface RollupConfig {
   keepRawEventsDays?: number;
   keepRollupsDays?: number;
@@ -123,7 +128,7 @@ export interface Driver {
   writeEvent(ev: TrackEvent): Promise<void>;
   getOverview(options?: OverviewOptions): Promise<OverviewData>;
   getUsers(options?: UsersOptions): Promise<UsersData>;
-  getFunnel(steps: FunnelStep[]): Promise<FunnelStepResult[]>;
+  getFunnel(steps: FunnelStep[], options?: FunnelOptions): Promise<FunnelStepResult[]>;
   getUserProfile?(userId: string): Promise<UserProfileData | null>;
   getCohorts?(): Promise<any[]>;
   getEvents?(options?: OverviewOptions): Promise<any>;

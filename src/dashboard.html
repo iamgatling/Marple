@@ -857,7 +857,7 @@
       const results = await fetchAPI('/funnel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ steps })
+        body: JSON.stringify({ steps, since: currentSince, until: currentUntil })
       });
       
       btn.textContent = 'Build';

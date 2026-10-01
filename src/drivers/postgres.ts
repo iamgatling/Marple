@@ -10,6 +10,7 @@ import {
   UserProfileData,
   FunnelStep,
   FunnelStepResult,
+  FunnelOptions,
   RollupConfig,
   MarpleConfig
 } from '../types.js';
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_evt_ts      ON events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_evt_uid     ON events(user_id);
 CREATE INDEX IF NOT EXISTS idx_evt_sid     ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_evt_sid_ts  ON events(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_evt_typ     ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_evt_utm_src ON events(utm_source);
 CREATE INDEX IF NOT EXISTS idx_evt_utm_med ON events(utm_medium);
@@ -112,6 +114,7 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
   }
   try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_ses_last_seen ON sessions(last_seen_at)`); } catch {}
   try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)`); } catch {}
+  try { await pool.query(`CREATE INDEX IF NOT EXISTS idx_evt_sid_ts ON events(session_id, timestamp)`); } catch {}
 
   const storageObj: Driver = {
     async writeEvent(ev: TrackEvent): Promise<void> {
@@ -334,48 +337,95 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
       };
     },
 
-    async getFunnel(steps: FunnelStep[]): Promise<FunnelStepResult[]> {
-      if (!steps || steps.length < 2) return [];
-      const results: FunnelStepResult[] = [];
-      let prevCount: number | null = null;
-      let sessionFilter = '';
-      let filterParams: string[] = [];
+    async getFunnel(steps: FunnelStep[], options?: FunnelOptions): Promise<FunnelStepResult[]> {
+      if (!steps || steps.length === 0) return [];
 
-      for (const step of steps) {
-        let count: number;
-        const currentParamIdx = filterParams.length + 1;
-        
-        if (sessionFilter === '') {
-          const queryStr = step.type === 'pageview'
-            ? `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type='pageview' AND url LIKE $${currentParamIdx}`
-            : `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type=$${currentParamIdx}`;
-          const row = await pool.query(queryStr, step.type === 'pageview' ? [`%${step.value}%`] : [step.value]);
-          count = parseInt(row.rows[0]?.count || '0', 10);
-        } else {
-          const queryStr = step.type === 'pageview'
-            ? `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type='pageview' AND url LIKE $${currentParamIdx} AND session_id IN (${sessionFilter})`
-            : `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type=$${currentParamIdx} AND session_id IN (${sessionFilter})`;
-          
-          const params = [...filterParams, step.type === 'pageview' ? `%${step.value}%` : step.value];
-          const row = await pool.query(queryStr, params);
-          count = parseInt(row.rows[0]?.count || '0', 10);
+      if (options?.since && isNaN(new Date(options.since).getTime())) {
+        throw new Error('Invalid "since" date');
+      }
+      if (options?.until && isNaN(new Date(options.until).getTime())) {
+        throw new Error('Invalid "until" date');
+      }
+      if (options?.since && options?.until && new Date(options.since).getTime() > new Date(options.until).getTime()) {
+        throw new Error('"since" date must be earlier than or equal to "until" date');
+      }
+
+      const cteClauses: string[] = [];
+      const params: any[] = [];
+      let paramIdx = 1;
+
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        const pfx = i === 0 ? '' : 'e.';
+        const clauses: string[] = [
+          `${pfx}session_id IS NOT NULL`,
+          `${pfx}session_id != ''`
+        ];
+
+        if (options?.since) {
+          clauses.push(`${pfx}timestamp >= $${paramIdx++}`);
+          params.push(options.since);
         }
-        
-        results.push({ step: step.label || step.value, count, dropoff: prevCount !== null ? Math.round((1 - count / (prevCount || 1)) * 100) : 0 });
-        prevCount = count;
+        if (options?.until) {
+          clauses.push(`${pfx}timestamp <= $${paramIdx++}`);
+          params.push(options.until);
+        }
 
         if (step.type === 'pageview') {
-          sessionFilter = sessionFilter === '' 
-            ? `SELECT session_id FROM events WHERE event_type='pageview' AND url LIKE $${currentParamIdx}` 
-            : `SELECT session_id FROM events WHERE event_type='pageview' AND url LIKE $${currentParamIdx} AND session_id IN (${sessionFilter})`;
-          filterParams.push(`%${step.value}%`);
+          clauses.push(`${pfx}event_type = 'pageview'`);
+          clauses.push(`${pfx}url LIKE $${paramIdx++}`);
+          params.push(`%${step.value}%`);
         } else {
-          sessionFilter = sessionFilter === '' 
-            ? `SELECT session_id FROM events WHERE event_type=$${currentParamIdx}` 
-            : `SELECT session_id FROM events WHERE event_type=$${currentParamIdx} AND session_id IN (${sessionFilter})`;
-          filterParams.push(step.value);
+          clauses.push(`${pfx}event_type = $${paramIdx++}`);
+          params.push(step.value);
+        }
+
+        if (i === 0) {
+          cteClauses.push(`
+            step_0 AS (
+              SELECT session_id, MIN(timestamp) as ts
+              FROM events
+              WHERE ${clauses.join(' AND ')}
+              GROUP BY session_id
+            )
+          `);
+        } else {
+          const prev = `step_${i - 1}`;
+          cteClauses.push(`
+            step_${i} AS (
+              SELECT e.session_id, MIN(e.timestamp) as ts
+              FROM events e
+              JOIN ${prev} ON e.session_id = ${prev}.session_id
+              WHERE e.timestamp > ${prev}.ts
+                AND ${clauses.join(' AND ')}
+              GROUP BY e.session_id
+            )
+          `);
         }
       }
+
+      const selectCols = steps.map((_, i) => `(SELECT COUNT(*) FROM step_${i}) as c_${i}`).join(', ');
+      const sql = `WITH ${cteClauses.join(', ')} SELECT ${selectCols}`;
+      const res = await pool.query(sql, params);
+      const row = res.rows[0];
+
+      let prevCount: number | null = null;
+      const results: FunnelStepResult[] = [];
+
+      for (let i = 0; i < steps.length; i++) {
+        const count = Number(row?.[`c_${i}`] || 0);
+        const dropoff = prevCount !== null && prevCount > 0
+          ? Math.round((1 - count / prevCount) * 100)
+          : 0;
+
+        results.push({
+          step: steps[i].label || steps[i].value,
+          count,
+          dropoff
+        });
+        prevCount = count;
+      }
+
       return results;
     },
 
