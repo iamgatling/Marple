@@ -13,11 +13,11 @@ export type MarpleRequest = IncomingMessage & {
   url?: string;
   headers: IncomingMessage['headers'];
   socket: IncomingMessage['socket'];
-  [key: string]: any;
+  [key: string]: unknown;
 };
 
 export type MarpleResponse = ServerResponse & {
-  [key: string]: any;
+  [key: string]: unknown;
 };
 
 const __filename = fileURLToPath(import.meta.url);
@@ -134,7 +134,7 @@ function sendJsonError(
 }
 
 export interface ReadJsonResult {
-  data: any;
+  data: unknown;
   payloadTooLarge?: boolean;
   aborted?: boolean;
 }
@@ -220,7 +220,7 @@ async function readJsonBody(
       }
     };
 
-    const onData = (chunk: any) => {
+    const onData = (chunk: Buffer | Uint8Array | string) => {
       if (settled) return;
       try {
         const buf = Buffer.isBuffer(chunk)
@@ -254,7 +254,7 @@ async function readJsonBody(
       }
     };
 
-    const onError = (err: any) => {
+    const onError = (err: unknown) => {
       if (settled) return;
       finish({ data: null }, true, err);
     };
@@ -350,8 +350,9 @@ async function handleCollect(
     }
 
     sendSafe(res, 204);
-  } catch (e: any) {
-    sendSafe(res, 400, JSON.stringify({ error: e?.message || 'Bad Request' }), {
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'Bad Request';
+    sendSafe(res, 400, JSON.stringify({ error: message }), {
       'Content-Type': 'application/json'
     });
   }
@@ -359,7 +360,7 @@ async function handleCollect(
 
 async function handleApi(subPath: string, req: MarpleRequest, res: MarpleResponse, storage: Driver): Promise<void> {
   const method = (req.method || 'GET').toUpperCase();
-  const send = (data: any, status = 200, extraHeaders: Record<string, string> = {}) => {
+  const send = (data: unknown, status = 200, extraHeaders: Record<string, string> = {}) => {
     sendSafe(res, status, JSON.stringify(data), { 'Content-Type': 'application/json', ...extraHeaders });
   };
   const sendError = (status: number, message: string, code: string, extraHeaders: Record<string, string> = {}) => {
@@ -390,7 +391,8 @@ async function handleApi(subPath: string, req: MarpleRequest, res: MarpleRespons
         if (!step || typeof step !== 'object') {
           return sendError(400, 'Invalid funnel step', 'INVALID_STEP');
         }
-        const stepVal = (step as any).value ?? (step as any).name;
+        const s = step as Record<string, unknown>;
+        const stepVal = typeof s.value === 'string' ? s.value : typeof s.name === 'string' ? s.name : undefined;
         if (stepVal !== undefined && typeof stepVal !== 'string') {
           return sendError(400, 'Invalid funnel step', 'INVALID_STEP');
         }
@@ -415,8 +417,9 @@ async function handleApi(subPath: string, req: MarpleRequest, res: MarpleRespons
       try {
         const results = await storage.getFunnel(steps, { since: effectiveSince, until: effectiveUntil });
         return send(results);
-      } catch (err: any) {
-        return sendError(400, err.message, 'FUNNEL_ERROR');
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Funnel error';
+        return sendError(400, message, 'FUNNEL_ERROR');
       }
     }
 
@@ -489,8 +492,9 @@ async function handleApi(subPath: string, req: MarpleRequest, res: MarpleRespons
     }
 
     sendError(404, 'Not found', 'NOT_FOUND');
-  } catch (e: any) {
-    sendError(500, e?.message || 'Internal Server Error', 'INTERNAL_ERROR');
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'Internal Server Error';
+    sendError(500, message, 'INTERNAL_ERROR');
   }
 }
 
@@ -534,7 +538,7 @@ export function createDashboardMiddleware({ authenticate, storage, config }: Das
   let clientSDK = getClientSDK();
   const rateLimiter = new RateLimiter();
 
-  return async function marpleMiddleware(req: MarpleRequest, res: MarpleResponse, next?: any) {
+  return async function marpleMiddleware(req: MarpleRequest, res: MarpleResponse, next?: (err?: unknown) => void) {
     if (config?.dev) {
       dashboardHTML = getDashboardHTML();
       clientSDK = getClientSDK();

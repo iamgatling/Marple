@@ -1,3 +1,4 @@
+import type { Pool } from 'pg';
 import { parseBrowser, parseDevice, maskIp, extractUtmParams, getPublicConfig, normalizeDateRange } from '../storage.js';
 import {
   Driver,
@@ -7,6 +8,7 @@ import {
   GoalConversionData,
   UsersOptions,
   UsersData,
+  UserRecord,
   UserProfileData,
   FunnelStep,
   FunnelStepResult,
@@ -15,7 +17,7 @@ import {
   MarpleConfig
 } from '../types.js';
 
-function tryParse(str: string): Record<string, any> {
+function tryParse(str: string): Record<string, unknown> {
   try { return JSON.parse(str); } catch { return {}; }
 }
 
@@ -92,10 +94,10 @@ CREATE INDEX IF NOT EXISTS idx_agg_date ON aggregated_metrics(date);
 `;
 
 export default async function openPostgresStorage(config: MarpleConfig): Promise<Driver> {
-  let pg: any;
+  let pg: { Pool: new (opts: { connectionString: string }) => Pool };
   try {
     const pgModule = await import('pg');
-    pg = pgModule.default || pgModule;
+    pg = (pgModule.default || pgModule) as unknown as { Pool: new (opts: { connectionString: string }) => Pool };
   } catch (err) {
     throw new Error('[Marple] PostgreSQL driver "pg" is not installed. Please run `npm install pg` to use the Postgres storage driver.');
   }
@@ -179,7 +181,7 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
       const totals = totalsRes.rows[0];
       const prevTotals = prevTotalsRes.rows[0];
       const active = activeRes.rows[0];
-      const availableGoals = availGoalsRes.rows.map((r: any) => r.event_type);
+      const availableGoals = availGoalsRes.rows.map((r: { event_type: string }) => r.event_type);
 
       let conversion: GoalConversionData | null = null;
       if (targetGoal) {
@@ -196,12 +198,12 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
         uniqueSessions: parseInt(totals?.us || '0', 10),
         uniqueUsers: parseInt(totals?.uu || '0', 10),
         activeNow: parseInt(active?.n || '0', 10),
-        topPages: topPagesRes.rows.map((r: any) => ({ ...r, views: parseInt(r.views, 10) })),
-        topReferrers: topReferrersRes.rows.map((r: any) => ({ ...r, count: parseInt(r.count, 10) })),
-        browsers: browsersRes.rows.map((r: any) => ({ ...r, count: parseInt(r.count, 10) })),
-        devices: devicesRes.rows.map((r: any) => ({ ...r, count: parseInt(r.count, 10) })),
-        countries: countriesRes.rows.map((r: any) => ({ ...r, count: parseInt(r.count, 10) })),
-        dailyViews: dailyViewsRes.rows.map((r: any) => ({ ...r, views: parseInt(r.views, 10) })),
+        topPages: topPagesRes.rows.map((r: { page: string; views: string | number }) => ({ ...r, views: parseInt(String(r.views), 10) })),
+        topReferrers: topReferrersRes.rows.map((r: { referrer: string; count: string | number }) => ({ ...r, count: parseInt(String(r.count), 10) })),
+        browsers: browsersRes.rows.map((r: { browser: string; count: string | number }) => ({ ...r, count: parseInt(String(r.count), 10) })),
+        devices: devicesRes.rows.map((r: { device_type: string; count: string | number }) => ({ ...r, count: parseInt(String(r.count), 10) })),
+        countries: countriesRes.rows.map((r: { country: string; count: string | number }) => ({ ...r, count: parseInt(String(r.count), 10) })),
+        dailyViews: dailyViewsRes.rows.map((r: { date: string; views: string | number }) => ({ ...r, views: parseInt(String(r.views), 10) })),
         previousPeriod: {
           totalEvents: parseInt(prevTotals?.te || '0', 10),
           uniqueSessions: parseInt(prevTotals?.us || '0', 10),
@@ -260,42 +262,42 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
       if (targetGoal) {
         return await calculateGoal(targetGoal);
       } else {
-        const goalsRes = await pool.query(`SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=$1 AND timestamp<=$2`, [since, until]);
-        return await Promise.all(goalsRes.rows.map((g: any) => calculateGoal(g.event_type)));
+        const goalsRes = await pool.query<{ event_type: string }>(`SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=$1 AND timestamp<=$2`, [since, until]);
+        return await Promise.all(goalsRes.rows.map(g => calculateGoal(g.event_type)));
       }
     },
 
     async getUsers({ limit = 50, offset = 0 }: UsersOptions = {}): Promise<UsersData> {
-      const usersRes = await pool.query(
+      const usersRes = await pool.query<{ id: string; first_seen: string; last_seen: string; country?: string | null; browser?: string | null; device_type?: string | null; event_count: string | number }>(
         `SELECT u.id, u.first_seen, u.last_seen, u.country, u.browser, u.device_type, COUNT(e.id) as event_count
          FROM users u LEFT JOIN events e ON e.user_id=u.id GROUP BY u.id ORDER BY u.last_seen DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
       );
-      const totalRes = await pool.query(`SELECT COUNT(*) as n FROM users`);
+      const totalRes = await pool.query<{ n: string }>(`SELECT COUNT(*) as n FROM users`);
       return {
-        users: usersRes.rows.map((r: any) => ({ ...r, event_count: parseInt(r.event_count, 10) })),
+        users: usersRes.rows.map(r => ({ ...r, event_count: parseInt(String(r.event_count), 10) })),
         total: parseInt(totalRes.rows[0]?.n || '0', 10)
       };
     },
 
     async getUserProfile(userId: string): Promise<UserProfileData | null> {
-      const userRes = await pool.query(`SELECT * FROM users WHERE id=$1`, [userId]);
+      const userRes = await pool.query<UserRecord>(`SELECT * FROM users WHERE id=$1`, [userId]);
       if (userRes.rowCount === 0) return null;
-      const eventsRes = await pool.query(
+      const eventsRes = await pool.query<{ event_type: string; url: string | null; properties: unknown; timestamp: string }>(
         `SELECT event_type, url, properties, timestamp FROM events WHERE user_id=$1 ORDER BY timestamp DESC LIMIT 100`,
         [userId]
       );
       return {
         user: userRes.rows[0],
-        events: eventsRes.rows.map((e: any) => ({
+        events: eventsRes.rows.map(e => ({
           ...e,
-          properties: typeof e.properties === 'string' ? tryParse(e.properties) : (e.properties || {})
+          properties: typeof e.properties === 'string' ? tryParse(e.properties) : ((e.properties as Record<string, unknown>) || {})
         }))
       };
     },
 
-    async getCohorts(): Promise<any[]> {
-      const res = await pool.query(`
+    async getCohorts(): Promise<unknown[]> {
+      const res = await pool.query<{ cohort_week: string; cohort_size: string | number; week_num: number; retained: string | number }>(`
         WITH base AS (
           SELECT id, TO_CHAR(first_seen::timestamp, 'IYYY-"W"IW') as cohort_week, first_seen FROM users
           ORDER BY first_seen DESC LIMIT 500
@@ -311,30 +313,30 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
           week_num, COUNT(DISTINCT id) as retained
         FROM act GROUP BY cohort_week, week_num ORDER BY cohort_week DESC, week_num ASC
       `);
-      return res.rows.map((r: any) => ({
+      return res.rows.map(r => ({
         ...r,
-        cohort_size: parseInt(r.cohort_size, 10),
-        retained: parseInt(r.retained, 10)
+        cohort_size: parseInt(String(r.cohort_size), 10),
+        retained: parseInt(String(r.retained), 10)
       }));
     },
 
-    async getEvents(options: OverviewOptions = {}): Promise<any> {
+    async getEvents(options: OverviewOptions = {}): Promise<unknown> {
       const { since, until, prevSince, prevUntil } = normalizeDateRange(options.since, options.until);
       const [eventsRes, prevEventsRes, trendRes] = await Promise.all([
-        pool.query(`SELECT event_type, COUNT(*) as count, COUNT(DISTINCT user_id) as unique_users FROM events WHERE timestamp>=$1 AND timestamp<=$2 AND event_type!='pageview' GROUP BY event_type ORDER BY count DESC`, [since, until]),
-        pool.query(`SELECT event_type, COUNT(*) as count FROM events WHERE timestamp>=$1 AND timestamp<$2 AND event_type!='pageview' GROUP BY event_type`, [prevSince, prevUntil]),
-        pool.query(`SELECT event_type, TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD') as date, COUNT(*) as count FROM events WHERE timestamp>=$1 AND timestamp<=$2 AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [since, until])
+        pool.query<{ event_type: string; count: string | number; unique_users: string | number }>(`SELECT event_type, COUNT(*) as count, COUNT(DISTINCT user_id) as unique_users FROM events WHERE timestamp>=$1 AND timestamp<=$2 AND event_type!='pageview' GROUP BY event_type ORDER BY count DESC`, [since, until]),
+        pool.query<{ event_type: string; count: string | number }>(`SELECT event_type, COUNT(*) as count FROM events WHERE timestamp>=$1 AND timestamp<$2 AND event_type!='pageview' GROUP BY event_type`, [prevSince, prevUntil]),
+        pool.query<{ event_type: string; date: string; count: string | number }>(`SELECT event_type, TO_CHAR(timestamp::timestamp, 'YYYY-MM-DD') as date, COUNT(*) as count FROM events WHERE timestamp>=$1 AND timestamp<=$2 AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [since, until])
       ]);
       
-      const prevMap = Object.fromEntries(prevEventsRes.rows.map((e: any) => [e.event_type, parseInt(e.count, 10)]));
+      const prevMap = Object.fromEntries(prevEventsRes.rows.map(e => [e.event_type, parseInt(String(e.count), 10)]));
       return {
-        events: eventsRes.rows.map((e: any) => ({
+        events: eventsRes.rows.map(e => ({
           ...e,
-          count: parseInt(e.count, 10),
-          unique_users: parseInt(e.unique_users, 10),
+          count: parseInt(String(e.count), 10),
+          unique_users: parseInt(String(e.unique_users), 10),
           prev_count: prevMap[e.event_type] || 0
         })),
-        trend: trendRes.rows.map((e: any) => ({ ...e, count: parseInt(e.count, 10) }))
+        trend: trendRes.rows.map(e => ({ ...e, count: parseInt(String(e.count), 10) }))
       };
     },
 
@@ -352,7 +354,7 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
       }
 
       const cteClauses: string[] = [];
-      const params: any[] = [];
+      const params: unknown[] = [];
       let paramIdx = 1;
 
       for (let i = 0; i < steps.length; i++) {
@@ -420,7 +422,7 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
           : 0;
 
         results.push({
-          step: steps[i].label || steps[i].value,
+          step: steps[i].label || steps[i].value || steps[i].name || '',
           count,
           dropoff
         });

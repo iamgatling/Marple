@@ -4,7 +4,7 @@ export interface TrackEvent {
   user_id?: string | null;
   url?: string | null;
   referrer?: string | null;
-  properties?: Record<string, any>;
+  properties?: Record<string, unknown>;
   ip?: string | null;
   ua?: string | null;
   country?: string | null;
@@ -70,7 +70,7 @@ export interface UserRecord {
   browser?: string | null;
   device_type?: string | null;
   event_count?: number;
-  properties?: Record<string, any>;
+  properties?: Record<string, unknown>;
 }
 
 export interface UsersData {
@@ -83,14 +83,15 @@ export interface UserProfileData {
   events: Array<{
     event_type: string;
     url?: string | null;
-    properties: Record<string, any>;
+    properties: Record<string, unknown>;
     timestamp: string;
   }>;
 }
 
 export interface FunnelStep {
-  type: string;
-  value: string;
+  type?: string;
+  value?: string;
+  name?: string;
   label?: string;
 }
 
@@ -112,7 +113,7 @@ export interface RollupConfig {
 }
 
 export interface MarpleConfig {
-  storage?: string | Driver | { type?: string; [key: string]: any };
+  storage?: string | Driver | { type?: string; [key: string]: unknown };
   sqlitePath?: string;
   postgresConnectionString?: string;
   connectionString?: string;
@@ -120,7 +121,7 @@ export interface MarpleConfig {
   trustProxy?: boolean | number | string | string[];
   dev?: boolean;
   dashboardPath?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface Driver {
@@ -130,8 +131,8 @@ export interface Driver {
   getUsers(options?: UsersOptions): Promise<UsersData>;
   getFunnel(steps: FunnelStep[], options?: FunnelOptions): Promise<FunnelStepResult[]>;
   getUserProfile?(userId: string): Promise<UserProfileData | null>;
-  getCohorts?(): Promise<any[]>;
-  getEvents?(options?: OverviewOptions): Promise<any>;
+  getCohorts?(): Promise<unknown[]>;
+  getEvents?(options?: OverviewOptions): Promise<unknown>;
   getConversions?(options?: OverviewOptions): Promise<GoalConversionData[] | GoalConversionData | null>;
   runRollup?(config?: RollupConfig): Promise<void>;
   getPublicConfig?(): MarpleConfig | Promise<MarpleConfig>;

@@ -8,7 +8,12 @@ const __dirname = path.dirname(__filename);
 
 const configFileName = 'marple.config.js';
 
-function detectFramework(packageJson: any): string {
+interface PackageJsonLike {
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+}
+
+function detectFramework(packageJson: PackageJsonLike): string {
   const deps = { ...packageJson.dependencies, ...packageJson.devDependencies };
   if (deps?.next) return 'Next.js';
   if (deps?.express) return 'Express';

@@ -10,6 +10,7 @@ import {
   GoalConversionData,
   UsersOptions,
   UsersData,
+  UserRecord,
   UserProfileData,
   FunnelStep,
   FunnelStepResult,
@@ -20,7 +21,7 @@ import {
 
 const require = createRequire(import.meta.url);
 
-function tryParse(str: string): Record<string, any> {
+function tryParse(str: string): Record<string, unknown> {
   try { return JSON.parse(str); } catch { return {}; }
 }
 
@@ -100,13 +101,13 @@ CREATE TABLE IF NOT EXISTS aggregated_metrics (
 CREATE INDEX IF NOT EXISTS idx_agg_date ON aggregated_metrics(date);
 `;
 
-function dbAll(db: any, sql: string, p: any[] = []): Promise<any[]> {
-  return new Promise((res, rej) => db.all(sql, p, (e: Error | null, r: any[]) => e ? rej(e) : res(r || [])));
+function dbAll<T = any>(db: any, sql: string, p: unknown[] = []): Promise<T[]> {
+  return new Promise((res, rej) => db.all(sql, p, (e: Error | null, r: T[]) => e ? rej(e) : res(r || [])));
 }
-function dbGet(db: any, sql: string, p: any[] = []): Promise<any> {
-  return new Promise((res, rej) => db.get(sql, p, (e: Error | null, r: any) => e ? rej(e) : res(r || null)));
+function dbGet<T = any>(db: any, sql: string, p: unknown[] = []): Promise<T | null> {
+  return new Promise((res, rej) => db.get(sql, p, (e: Error | null, r: T) => e ? rej(e) : res(r || null)));
 }
-function dbRun(db: any, sql: string, p: any[] = []): Promise<any> {
+function dbRun(db: any, sql: string, p: unknown[] = []): Promise<{ lastID: number; changes: number }> {
   return new Promise((res, rej) => db.run(sql, p, function(this: any, e: Error | null) { e ? rej(e) : res(this); }));
 }
 
@@ -184,7 +185,7 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
         dbAll(db, `SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=? AND timestamp<=?`, [since, until]),
       ]);
 
-      const availableGoals = availGoals.map((r: any) => r.event_type);
+      const availableGoals = (availGoals as Array<{ event_type: string }>).map(r => r.event_type);
 
       let conversion: GoalConversionData | null = null;
       if (targetGoal) {
@@ -257,33 +258,41 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       if (targetGoal) {
         return await calculateGoal(targetGoal);
       } else {
-        const goalsList = await dbAll(db, `SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=? AND timestamp<=?`, [since, until]);
-        return await Promise.all(goalsList.map((g: any) => calculateGoal(g.event_type)));
+        const goalsList = await dbAll<{ event_type: string }>(db, `SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=? AND timestamp<=?`, [since, until]);
+        return await Promise.all(goalsList.map(g => calculateGoal(g.event_type)));
       }
     },
 
     async getUsers({ limit = 50, offset = 0 }: UsersOptions = {}): Promise<UsersData> {
-      const users = await dbAll(db,
+      const users = await dbAll<UserRecord>(db,
         `SELECT u.id, u.first_seen, u.last_seen, u.country, u.browser, u.device_type, COUNT(e.id) as event_count
          FROM users u LEFT JOIN events e ON e.user_id=u.id GROUP BY u.id ORDER BY u.last_seen DESC LIMIT ? OFFSET ?`,
         [limit, offset]
       );
-      const totalRow = await dbGet(db, `SELECT COUNT(*) as n FROM users`);
+      const totalRow = await dbGet<{ n: number }>(db, `SELECT COUNT(*) as n FROM users`);
       const total = totalRow?.n || 0;
       return { users, total };
     },
 
     async getUserProfile(userId: string): Promise<UserProfileData | null> {
-      const user = await dbGet(db, `SELECT * FROM users WHERE id=?`, [userId]);
+      const user = await dbGet<UserRecord>(db, `SELECT * FROM users WHERE id=?`, [userId]);
       if (!user) return null;
-      const events = await dbAll(db,
+      const events = await dbAll<Record<string, unknown>>(db,
         `SELECT event_type, url, properties, timestamp FROM events WHERE user_id=? ORDER BY timestamp DESC LIMIT 100`,
         [userId]
       );
-      return { user, events: events.map((e: any) => ({ ...e, properties: tryParse(e.properties) })) };
+      return {
+        user,
+        events: events.map(e => ({
+          event_type: String(e.event_type || ''),
+          url: e.url ? String(e.url) : null,
+          properties: tryParse(String(e.properties || '{}')),
+          timestamp: String(e.timestamp || '')
+        }))
+      };
     },
 
-    async getCohorts(): Promise<any[]> {
+    async getCohorts(): Promise<unknown[]> {
       return dbAll(db, `
         WITH base AS (
           SELECT id, strftime('%Y-W%W', first_seen) as cohort_week, first_seen FROM users
@@ -302,15 +311,15 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       `);
     },
 
-    async getEvents(options: OverviewOptions = {}): Promise<any> {
+    async getEvents(options: OverviewOptions = {}): Promise<unknown> {
       const { since, until, prevSince, prevUntil } = normalizeDateRange(options.since, options.until);
       const [events, prevEvents, trend] = await Promise.all([
-        dbAll(db, `SELECT event_type, COUNT(*) as count, COUNT(DISTINCT user_id) as unique_users FROM events WHERE timestamp>=? AND timestamp<=? AND event_type!='pageview' GROUP BY event_type ORDER BY count DESC`, [since, until]),
-        dbAll(db, `SELECT event_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<? AND event_type!='pageview' GROUP BY event_type`, [prevSince, prevUntil]),
-        dbAll(db, `SELECT event_type, substr(timestamp,1,10) as date, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [since, until]),
+        dbAll<{ event_type: string; count: number; unique_users: number }>(db, `SELECT event_type, COUNT(*) as count, COUNT(DISTINCT user_id) as unique_users FROM events WHERE timestamp>=? AND timestamp<=? AND event_type!='pageview' GROUP BY event_type ORDER BY count DESC`, [since, until]),
+        dbAll<{ event_type: string; count: number }>(db, `SELECT event_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<? AND event_type!='pageview' GROUP BY event_type`, [prevSince, prevUntil]),
+        dbAll<{ event_type: string; date: string; count: number }>(db, `SELECT event_type, substr(timestamp,1,10) as date, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [since, until]),
       ]);
-      const prevMap = Object.fromEntries(prevEvents.map((e: any) => [e.event_type, e.count]));
-      return { events: events.map((e: any) => ({ ...e, prev_count: prevMap[e.event_type] || 0 })), trend };
+      const prevMap = Object.fromEntries(prevEvents.map(e => [e.event_type, e.count]));
+      return { events: events.map(e => ({ ...e, prev_count: prevMap[e.event_type] || 0 })), trend };
     },
 
     async getFunnel(steps: FunnelStep[], options?: FunnelOptions): Promise<FunnelStepResult[]> {
@@ -327,7 +336,7 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       }
 
       const cteClauses: string[] = [];
-      const params: any[] = [];
+      const params: unknown[] = [];
 
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
@@ -393,7 +402,7 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
           : 0;
 
         results.push({
-          step: steps[i].label || steps[i].value,
+          step: steps[i].label || steps[i].value || steps[i].name || '',
           count,
           dropoff
         });
