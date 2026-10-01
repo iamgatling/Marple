@@ -14,6 +14,7 @@ import './validation.test.js';
 import './proxy.test.js';
 import './retention.test.js';
 import './funnel.test.js';
+import './config.test.js';
 import './regressions.test.js';
 
 describe('Marple Core & Middleware Test Suite', () => {

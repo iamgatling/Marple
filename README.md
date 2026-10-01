@@ -272,6 +272,27 @@ npx marple help    # Show usage
 
 ---
 
+## Configuration
+
+Options can be passed directly to `marple.init(options)`, imported from `marple.config.js`, or loaded automatically when calling `marple.init()`:
+
+```js
+// marple.config.js
+export default {
+  storage: 'sqlite',
+  sqlitePath: './marple.sqlite',
+  retention: {
+    keepRawEventsDays: 30,
+    keepRollupsDays: 365,
+    autoRollup: true
+  }
+};
+```
+
+You can also explicitly load configuration using `await marple.loadConfig()`.
+
+---
+
 ## Proxy Configuration & Client IP Resolution
 
 Marple never trusts `X-Forwarded-For` headers by default. Direct peer IP addresses (`req.socket.remoteAddress`) are used for rate limiting and event persistence unless explicitly configured via `trustProxy`.

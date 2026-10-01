@@ -24,8 +24,7 @@ export default {
     keepRawEventsDays: 30,
     keepRollupsDays: 365,
     autoRollup: true
-  },
-  dashboardPath: '/marple',
+  }
 };
 `;
 }
