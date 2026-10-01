@@ -120,31 +120,34 @@ describe('API Contract & Validation Test Suite', () => {
       if (serverHelper) await serverHelper.close();
     });
 
-    test('GET on /collect does not trigger event ingestion', async () => {
+    test('GET on /collect does not trigger event ingestion and returns 405', async () => {
       writtenEvents.length = 0;
       const res = await makeRequest(`${serverHelper.baseUrl}/collect?event_type=get_leak`, {
         method: 'GET'
       });
-      assert.strictEqual(res.status, 400);
+      assert.strictEqual(res.status, 405);
+      assert.strictEqual(res.headers['allow'], 'POST');
       assert.strictEqual(writtenEvents.length, 0, 'GET query params should not be ingested as events');
     });
 
-    test('PUT on /collect without valid event does not trigger event ingestion', async () => {
+    test('PUT on /collect without valid event does not trigger event ingestion and returns 405', async () => {
       writtenEvents.length = 0;
       const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
         method: 'PUT',
         body: {}
       });
-      assert.strictEqual(res.status, 400);
+      assert.strictEqual(res.status, 405);
+      assert.strictEqual(res.headers['allow'], 'POST');
       assert.strictEqual(writtenEvents.length, 0);
     });
 
-    test('DELETE on /collect does not trigger event ingestion', async () => {
+    test('DELETE on /collect does not trigger event ingestion and returns 405', async () => {
       writtenEvents.length = 0;
       const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
         method: 'DELETE'
       });
-      assert.strictEqual(res.status, 400);
+      assert.strictEqual(res.status, 405);
+      assert.strictEqual(res.headers['allow'], 'POST');
       assert.strictEqual(writtenEvents.length, 0);
     });
   });

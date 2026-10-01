@@ -101,8 +101,13 @@ function sendSafe(
     return false;
   }
   try {
-    res.writeHead(status, headers);
-    if (body !== null && body !== undefined) {
+    const finalHeaders = {
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'SAMEORIGIN',
+      ...headers
+    };
+    res.writeHead(status, finalHeaders);
+    if (body !== null && body !== undefined && res.req?.method !== 'HEAD') {
       res.end(body);
     } else {
       res.end();
@@ -111,6 +116,21 @@ function sendSafe(
   } catch {
     return false;
   }
+}
+
+function sendJsonError(
+  res: MarpleResponse,
+  status: number,
+  message: string,
+  code: string,
+  headers: Record<string, string> = {}
+): boolean {
+  return sendSafe(
+    res,
+    status,
+    JSON.stringify({ error: message, code, message }),
+    { 'Content-Type': 'application/json', ...headers }
+  );
 }
 
 export interface ReadJsonResult {
@@ -338,27 +358,21 @@ async function handleCollect(
 }
 
 async function handleApi(subPath: string, req: MarpleRequest, res: MarpleResponse, storage: Driver): Promise<void> {
-  const send = (data: any, status = 200) => {
-    sendSafe(res, status, JSON.stringify(data), { 'Content-Type': 'application/json' });
+  const method = (req.method || 'GET').toUpperCase();
+  const send = (data: any, status = 200, extraHeaders: Record<string, string> = {}) => {
+    sendSafe(res, status, JSON.stringify(data), { 'Content-Type': 'application/json', ...extraHeaders });
+  };
+  const sendError = (status: number, message: string, code: string, extraHeaders: Record<string, string> = {}) => {
+    sendJsonError(res, status, message, code, extraHeaders);
   };
   const url = new URL(req.url || '/', 'http://localhost');
   const params = Object.fromEntries(url.searchParams);
 
   try {
-    if (subPath === '/overview')    return send(await storage.getOverview({ since: params.since, until: params.until, goal: params.goal || params.targetGoal }));
-    if (subPath === '/users')       return send(await storage.getUsers({ limit: +params.limit || 50, offset: +params.offset || 0 }));
-    if (subPath === '/cohorts')     return send(typeof storage.getCohorts === 'function' ? await storage.getCohorts() : []);
-    if (subPath === '/events')      return send(typeof storage.getEvents === 'function' ? await storage.getEvents({ since: params.since, until: params.until }) : { events: [], trend: [] });
-    if (subPath === '/conversions' || subPath === '/goals') return send(typeof storage.getConversions === 'function' ? await storage.getConversions({ since: params.since, until: params.until, goal: params.goal || params.targetGoal }) : null);
-    if (subPath === '/config')      return send(typeof storage.getPublicConfig === 'function' ? await storage.getPublicConfig() : getPublicConfig(storage.config || {}));
-
-    if (subPath.startsWith('/users/')) {
-      const userId = decodeURIComponent(subPath.slice('/users/'.length));
-      const profile = typeof storage.getUserProfile === 'function' ? await storage.getUserProfile(userId) : null;
-      return profile ? send(profile) : send({ error: 'Not found' }, 404);
-    }
-
     if (subPath === '/funnel') {
+      if (method !== 'POST') {
+        return sendError(405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED', { 'Allow': 'POST' });
+      }
       const { data: bodyData } = await readJsonBody(req, 8192);
       const { steps, since, until } = (bodyData || {}) as {
         steps?: FunnelStep[];
@@ -367,36 +381,116 @@ async function handleApi(subPath: string, req: MarpleRequest, res: MarpleRespons
       };
 
       if (!steps || !Array.isArray(steps)) {
-        return send({ error: 'Funnel requires an array of steps' }, 400);
+        return sendError(400, 'Funnel requires an array of steps', 'INVALID_STEPS');
       }
       if (steps.length === 0) {
         return send([]);
+      }
+      for (const step of steps) {
+        if (!step || typeof step !== 'object') {
+          return sendError(400, 'Invalid funnel step', 'INVALID_STEP');
+        }
+        const stepVal = (step as any).value ?? (step as any).name;
+        if (stepVal !== undefined && typeof stepVal !== 'string') {
+          return sendError(400, 'Invalid funnel step', 'INVALID_STEP');
+        }
+        if (typeof stepVal === 'string' && stepVal.length > 256) {
+          return sendError(400, 'Invalid funnel step', 'INVALID_STEP');
+        }
       }
 
       const effectiveSince = since !== undefined ? since : params.since;
       const effectiveUntil = until !== undefined ? until : params.until;
 
       if (effectiveSince && isNaN(new Date(effectiveSince).getTime())) {
-        return send({ error: 'Invalid "since" date range' }, 400);
+        return sendError(400, 'Invalid "since" date range', 'INVALID_DATE');
       }
       if (effectiveUntil && isNaN(new Date(effectiveUntil).getTime())) {
-        return send({ error: 'Invalid "until" date range' }, 400);
+        return sendError(400, 'Invalid "until" date range', 'INVALID_DATE');
       }
       if (effectiveSince && effectiveUntil && new Date(effectiveSince).getTime() > new Date(effectiveUntil).getTime()) {
-        return send({ error: '"since" must be earlier than or equal to "until"' }, 400);
+        return sendError(400, '"since" must be earlier than or equal to "until"', 'INVALID_DATE_RANGE');
       }
 
       try {
         const results = await storage.getFunnel(steps, { since: effectiveSince, until: effectiveUntil });
         return send(results);
       } catch (err: any) {
-        return send({ error: err.message }, 400);
+        return sendError(400, err.message, 'FUNNEL_ERROR');
       }
     }
 
-    send({ error: 'Not found' }, 404);
+    if (method !== 'GET' && method !== 'HEAD') {
+      return sendError(405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED', { 'Allow': 'GET, HEAD' });
+    }
+
+    const checkDateParams = () => {
+      if (params.since && isNaN(new Date(params.since).getTime())) {
+        sendError(400, 'Invalid "since" date parameter', 'INVALID_DATE');
+        return false;
+      }
+      if (params.until && isNaN(new Date(params.until).getTime())) {
+        sendError(400, 'Invalid "until" date parameter', 'INVALID_DATE');
+        return false;
+      }
+      if (params.since && params.until && new Date(params.since).getTime() > new Date(params.until).getTime()) {
+        sendError(400, '"since" must be earlier than or equal to "until"', 'INVALID_DATE_RANGE');
+        return false;
+      }
+      return true;
+    };
+
+    const targetGoal = params.goal || params.targetGoal;
+    if (targetGoal && (typeof targetGoal !== 'string' || targetGoal.length > 256)) {
+      return sendError(400, 'Goal parameter too long', 'INVALID_GOAL');
+    }
+
+    if (subPath === '/overview') {
+      if (!checkDateParams()) return;
+      return send(await storage.getOverview({ since: params.since, until: params.until, goal: targetGoal }));
+    }
+
+    if (subPath === '/users') {
+      let limit = 50;
+      if (params.limit !== undefined) {
+        const parsed = parseInt(params.limit, 10);
+        if (!Number.isNaN(parsed)) {
+          limit = Math.min(100, Math.max(1, parsed));
+        }
+      }
+      let offset = 0;
+      if (params.offset !== undefined) {
+        const parsed = parseInt(params.offset, 10);
+        if (!Number.isNaN(parsed)) {
+          offset = Math.max(0, parsed);
+        }
+      }
+      return send(await storage.getUsers({ limit, offset }));
+    }
+
+    if (subPath === '/cohorts')     return send(typeof storage.getCohorts === 'function' ? await storage.getCohorts() : []);
+    if (subPath === '/events') {
+      if (!checkDateParams()) return;
+      return send(typeof storage.getEvents === 'function' ? await storage.getEvents({ since: params.since, until: params.until }) : { events: [], trend: [] });
+    }
+    if (subPath === '/conversions' || subPath === '/goals') {
+      if (!checkDateParams()) return;
+      return send(typeof storage.getConversions === 'function' ? await storage.getConversions({ since: params.since, until: params.until, goal: targetGoal }) : null);
+    }
+    if (subPath === '/config')      return send(typeof storage.getPublicConfig === 'function' ? await storage.getPublicConfig() : getPublicConfig(storage.config || {}));
+
+    if (subPath.startsWith('/users/')) {
+      const userId = decodeURIComponent(subPath.slice('/users/'.length));
+      if (!userId || userId.length > 256 || /[\0\r\n]/.test(userId)) {
+        return sendError(400, 'Invalid user ID', 'INVALID_USER_ID');
+      }
+      const profile = typeof storage.getUserProfile === 'function' ? await storage.getUserProfile(userId) : null;
+      return profile ? send(profile) : sendError(404, 'Not found', 'NOT_FOUND');
+    }
+
+    sendError(404, 'Not found', 'NOT_FOUND');
   } catch (e: any) {
-    send({ error: e.message }, 500);
+    sendError(500, e?.message || 'Internal Server Error', 'INTERNAL_ERROR');
   }
 }
 
@@ -446,13 +540,22 @@ export function createDashboardMiddleware({ authenticate, storage, config }: Das
       clientSDK = getClientSDK();
     }
     const rawPath = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
+    const method = (req.method || 'GET').toUpperCase();
 
     if (rawPath === '/client.js' || rawPath.endsWith('/marple/client.js')) {
+      if (method !== 'GET' && method !== 'HEAD') {
+        sendJsonError(res, 405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED', { 'Allow': 'GET, HEAD' });
+        return;
+      }
       sendSafe(res, 200, clientSDK, { 'Content-Type': 'application/javascript', 'Cache-Control': 'public,max-age=3600' });
       return;
     }
 
     if (rawPath === '/collect' || rawPath.endsWith('/marple/collect')) {
+      if (method !== 'POST') {
+        sendJsonError(res, 405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED', { 'Allow': 'POST' });
+        return;
+      }
       return handleCollect(req, res, storage, config, rateLimiter);
     }
 
@@ -469,6 +572,11 @@ export function createDashboardMiddleware({ authenticate, storage, config }: Das
     const apiMatch = rawPath.match(/\/api(\/.*)?$/);
     if (apiMatch) {
       return handleApi(apiMatch[1] || '/', req, res, storage);
+    }
+
+    if (method !== 'GET' && method !== 'HEAD') {
+      sendJsonError(res, 405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED', { 'Allow': 'GET, HEAD' });
+      return;
     }
 
     sendSafe(res, 200, dashboardHTML, {

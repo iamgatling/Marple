@@ -16,6 +16,7 @@ import './retention.test.js';
 import './funnel.test.js';
 import './config.test.js';
 import './package-cjs.test.js';
+import './routes-hardening.test.js';
 import './regressions.test.js';
 
 describe('Marple Core & Middleware Test Suite', () => {
