@@ -138,12 +138,14 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       const utm_term = ev.utm_term || utm.utm_term || null;
       const utm_content = ev.utm_content || utm.utm_content || null;
 
+      const timestamp = ev.timestamp || new Date().toISOString();
+
       await dbRun(db,
         `INSERT INTO events(event_type,session_id,user_id,url,referrer,properties,ip,ua,country,browser,device_type,timestamp,utm_source,utm_medium,utm_campaign,utm_term,utm_content)
          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [ev.event_type, ev.session_id, ev.user_id, ev.url, ev.referrer,
          JSON.stringify(ev.properties || {}), maskedIp, ev.ua, ev.country,
-         browser, device_type, ev.timestamp,
+         browser, device_type, timestamp,
          utm_source, utm_medium, utm_campaign, utm_term, utm_content]
       );
       if (ev.session_id) {

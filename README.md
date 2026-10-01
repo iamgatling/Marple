@@ -13,7 +13,7 @@ Marple is a self-hosted, privacy-first analytics package for JavaScript/TypeScri
 - **Auto Link Tracking**: Detects outbound link clicks (`outbound_click`) and file download clicks (`download`) via a single delegated `document` listener — no configuration needed.
 - **Privacy by Default (DNT & GPC)**: If `navigator.doNotTrack` or `navigator.globalPrivacyControl` is set, the SDK silently disables all event queuing and transmission.
 - **UTM Parameter Extraction**: Automatically parses and stores `utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, and `utm_content` from each event URL.
-- **IP Masking**: The last octet of IPv4 addresses (and the last group of IPv6 addresses) is zeroed before storage.
+- **IP Masking**: Client IP addresses are anonymized before storage by zeroing the last octet (/24) for IPv4 and zeroing the last 80 bits (/48 subnet) for IPv6, fully supporting compressed IPv6 and IPv4-mapped IPv6 addresses.
 - **Bot Filtering**: Events from known bots and crawlers are silently dropped on the server using [isbot](https://www.npmjs.com/package/isbot).
 - **Rate Limiting**: The `/collect` endpoint enforces a per-IP limit of 100 requests per 60-second window.
 - **SQLite & PostgreSQL Storage**: Zero-config SQLite (WAL mode) or a PostgreSQL connection string. You can also provide a fully custom `Driver` object.
@@ -312,6 +312,20 @@ await marple.init({
   // trustProxy: ['127.0.0.1', '10.0.0.1']
 });
 ```
+
+---
+
+## Privacy & Data Anonymization
+
+Marple is designed to comply with privacy frameworks (such as GDPR and ePrivacy) out of the box:
+
+- **IP Anonymization**: All IP addresses are masked before being written to persistent storage:
+  - **IPv4**: The last octet (8 bits) is zeroed (`192.168.1.42` -> `192.168.1.0`), preserving only the `/24` network prefix.
+  - **IPv6**: The last 80 bits are zeroed (`2001:db8:85a3::8a2e:370:7334` -> `2001:db8:85a3::`), preserving only the `/48` prefix.
+  - **IPv4-Mapped IPv6**: Addresses like `::ffff:192.168.1.42` are resolved and masked to standard IPv4 prefixes (`192.168.1.0`).
+  - **Compressed Notation**: Full support for `::` shorthand and bracketed notation with port numbers.
+- **Do Not Track & Global Privacy Control**: If `navigator.doNotTrack === '1'` or `navigator.globalPrivacyControl === true`, client event capture is completely disabled.
+- **No Third-Party Transmission**: Data stays entirely inside your chosen SQLite or PostgreSQL database.
 
 ---
 

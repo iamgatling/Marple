@@ -127,13 +127,14 @@ export default async function openPostgresStorage(config: MarpleConfig): Promise
       const utm_campaign = ev.utm_campaign || utm.utm_campaign || null;
       const utm_term = ev.utm_term || utm.utm_term || null;
       const utm_content = ev.utm_content || utm.utm_content || null;
-      
+      const timestamp = ev.timestamp || new Date().toISOString();
+
       await pool.query(
         `INSERT INTO events(event_type,session_id,user_id,url,referrer,properties,ip,ua,country,browser,device_type,timestamp,utm_source,utm_medium,utm_campaign,utm_term,utm_content)
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
         [ev.event_type, ev.session_id, ev.user_id, ev.url, ev.referrer,
          ev.properties || {}, maskedIp, ev.ua, ev.country,
-         browser, device_type, ev.timestamp,
+         browser, device_type, timestamp,
          utm_source, utm_medium, utm_campaign, utm_term, utm_content]
       );
 
