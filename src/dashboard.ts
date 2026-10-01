@@ -1,135 +1,537 @@
 import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import type { IncomingMessage, ServerResponse } from 'http';
 import { isbot } from 'isbot';
 import { getPublicConfig } from './storage.js';
 import { Driver, MarpleConfig, TrackEvent, FunnelStep } from './types.js';
+import { validateIngestBatch, ValidationError, IngestEvent } from './validation.js';
+import { getClientIp, isIpTrusted, normalizeIp } from './proxy.js';
+
+export type MarpleRequest = IncomingMessage & {
+  body?: unknown;
+  url?: string;
+  headers: IncomingMessage['headers'];
+  socket: IncomingMessage['socket'];
+  [key: string]: unknown;
+};
+
+export type MarpleResponse = ServerResponse & {
+  [key: string]: unknown;
+};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const collectRateLimitMap = new Map<string, number[]>();
-const COLLECT_RATE_LIMIT_MAX = 100;
-const COLLECT_RATE_LIMIT_WINDOW_MS = 60 * 1000;
-
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const windowStart = now - COLLECT_RATE_LIMIT_WINDOW_MS;
-
-  let timestamps = collectRateLimitMap.get(ip);
-  if (!timestamps) {
-    timestamps = [];
-  } else {
-    while (timestamps.length > 0 && timestamps[0] <= windowStart) {
-      timestamps.shift();
-    }
-  }
-
-  if (timestamps.length >= COLLECT_RATE_LIMIT_MAX) {
-    return true;
-  }
-
-  timestamps.push(now);
-  collectRateLimitMap.set(ip, timestamps);
-
-  if (collectRateLimitMap.size > 1000) {
-    for (const [k, ts] of collectRateLimitMap.entries()) {
-      if (ts.length === 0 || ts[ts.length - 1] <= windowStart) {
-        collectRateLimitMap.delete(k);
-      }
-    }
-  }
-
-  return false;
+export interface RateLimitResult {
+  limited: boolean;
+  retryAfter: number;
 }
 
-async function handleCollect(req: any, res: any, storage: Driver): Promise<void> {
+export class RateLimiter {
+  private map = new Map<string, number[]>();
+  private maxRequests: number;
+  private windowMs: number;
+  private maxKeys: number;
+
+  constructor(maxRequests = 100, windowMs = 60 * 1000, maxKeys = 5000) {
+    this.maxRequests = maxRequests;
+    this.windowMs = windowMs;
+    this.maxKeys = maxKeys;
+  }
+
+  check(ip: string): RateLimitResult {
+    const now = Date.now();
+    const windowStart = now - this.windowMs;
+
+    let timestamps = this.map.get(ip);
+    if (!timestamps) {
+      timestamps = [];
+    } else {
+      while (timestamps.length > 0 && timestamps[0] <= windowStart) {
+        timestamps.shift();
+      }
+    }
+
+    if (timestamps.length >= this.maxRequests) {
+      const oldest = timestamps[0];
+      const retryAfter = Math.max(1, Math.ceil((oldest + this.windowMs - now) / 1000));
+      return { limited: true, retryAfter };
+    }
+
+    timestamps.push(now);
+    this.map.set(ip, timestamps);
+
+    if (this.map.size > this.maxKeys) {
+      for (const [k, ts] of this.map.entries()) {
+        if (ts.length === 0 || ts[ts.length - 1] <= windowStart) {
+          this.map.delete(k);
+        }
+        if (this.map.size <= this.maxKeys * 0.8) break;
+      }
+      if (this.map.size > this.maxKeys) {
+        for (const k of this.map.keys()) {
+          this.map.delete(k);
+          if (this.map.size <= this.maxKeys * 0.8) break;
+        }
+      }
+    }
+
+    return { limited: false, retryAfter: 0 };
+  }
+
+  reset(): void {
+    this.map.clear();
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
+}
+
+const defaultRateLimiter = new RateLimiter();
+
+function sendSafe(
+  res: MarpleResponse,
+  status: number,
+  body?: string | null,
+  headers: Record<string, string> = {}
+): boolean {
+  if (res.headersSent || res.writableEnded || res.destroyed) {
+    return false;
+  }
   try {
-    const ip = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
-    if (checkRateLimit(ip)) {
-      res.writeHead(429, { 'Content-Type': 'text/plain' });
-      return res.end('Too Many Requests');
+    const finalHeaders = {
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'SAMEORIGIN',
+      ...headers
+    };
+    res.writeHead(status, finalHeaders);
+    if (body !== null && body !== undefined && res.req?.method !== 'HEAD') {
+      res.end(body);
+    } else {
+      res.end();
     }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-    const ua = req.headers['user-agent'] || '';
-    if (isbot(ua)) {
-      res.writeHead(204);
-      return res.end();
+function sendJsonError(
+  res: MarpleResponse,
+  status: number,
+  message: string,
+  code: string,
+  headers: Record<string, string> = {}
+): boolean {
+  return sendSafe(
+    res,
+    status,
+    JSON.stringify({ error: message, code, message }),
+    { 'Content-Type': 'application/json', ...headers }
+  );
+}
+
+export interface ReadJsonResult {
+  data: unknown;
+  payloadTooLarge?: boolean;
+  aborted?: boolean;
+}
+
+async function readJsonBody(
+  req: MarpleRequest,
+  maxBytes: number = 64 * 1024
+): Promise<ReadJsonResult> {
+  const contentLengthRaw = req.headers['content-length'];
+  if (contentLengthRaw) {
+    const contentLength = typeof contentLengthRaw === 'string'
+      ? parseInt(contentLengthRaw, 10)
+      : parseInt(contentLengthRaw[0], 10);
+    if (!Number.isNaN(contentLength) && contentLength > maxBytes) {
+      if (!req.readableEnded && !req.destroyed && typeof req.resume === 'function') {
+        req.resume();
+      }
+      return { data: null, payloadTooLarge: true };
     }
+  }
 
-    const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KB
-    let body = '';
-    await new Promise<void>((resolve) => {
-      req.on('data', (chunk: any) => {
-        body += chunk;
-        if (Buffer.byteLength(body) > MAX_PAYLOAD_BYTES) {
-          res.writeHead(413);
-          res.end('Payload too large');
-          resolve();
+  if (req.body !== undefined && req.body !== null) {
+    if (typeof req.body === 'string') {
+      if (Buffer.byteLength(req.body) > maxBytes) {
+        return { data: null, payloadTooLarge: true };
+      }
+      try {
+        return { data: req.body ? JSON.parse(req.body) : {} };
+      } catch {
+        throw new Error('Malformed JSON');
+      }
+    }
+    if (Buffer.isBuffer(req.body)) {
+      if (req.body.length > maxBytes) {
+        return { data: null, payloadTooLarge: true };
+      }
+      try {
+        const str = req.body.toString('utf-8');
+        return { data: str ? JSON.parse(str) : {} };
+      } catch {
+        throw new Error('Malformed JSON');
+      }
+    }
+    if (typeof req.body === 'object') {
+      try {
+        const jsonStr = JSON.stringify(req.body);
+        if (Buffer.byteLength(jsonStr) > maxBytes) {
+          return { data: null, payloadTooLarge: true };
+        }
+      } catch {
+        // If stringify fails, proceed with object as-is
+      }
+      return { data: req.body };
+    }
+    return { data: req.body };
+  }
+
+  if (req.readableEnded || req.complete || req.destroyed) {
+    return { data: {} };
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let totalBytes = 0;
+    const chunks: Buffer[] = [];
+
+    const cleanup = () => {
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+      req.removeListener('close', onClose);
+      req.removeListener('aborted', onAbort);
+    };
+
+    const finish = (result: ReadJsonResult, isError: boolean = false, error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (isError) {
+        reject(error);
+      } else {
+        resolve(result);
+      }
+    };
+
+    const onData = (chunk: Buffer | Uint8Array | string) => {
+      if (settled) return;
+      try {
+        const buf = Buffer.isBuffer(chunk)
+          ? chunk
+          : Buffer.from(typeof chunk === 'string' ? chunk : String(chunk));
+        totalBytes += buf.length;
+
+        if (totalBytes > maxBytes) {
+          if (!req.readableEnded && !req.destroyed && typeof req.resume === 'function') {
+            req.resume();
+          }
+          finish({ data: null, payloadTooLarge: true });
           return;
         }
-      });
-      req.on('end', resolve);
-    });
-    if (!body || res.writableEnded) return;
 
-    const payload = JSON.parse(body || '{}');
-    const MAX_EVENTS_PER_BATCH = 50;
-    const events: TrackEvent[] = Array.isArray(payload) ? payload : [payload];
-    if (events.length > MAX_EVENTS_PER_BATCH) {
-      res.writeHead(400);
-      res.end('Too many events in batch');
+        chunks.push(buf);
+      } catch (err) {
+        finish({ data: null }, true, err);
+      }
+    };
+
+    const onEnd = () => {
+      if (settled) return;
+      try {
+        const fullBuffer = Buffer.concat(chunks, totalBytes);
+        const str = fullBuffer.toString('utf-8');
+        const data = str ? JSON.parse(str) : {};
+        finish({ data });
+      } catch (err) {
+        finish({ data: null }, true, err);
+      }
+    };
+
+    const onError = (err: unknown) => {
+      if (settled) return;
+      finish({ data: null }, true, err);
+    };
+
+    const onClose = () => {
+      if (settled) return;
+      if (!req.readableEnded && !req.complete) {
+        finish({ data: null, aborted: true });
+      }
+    };
+
+    const onAbort = () => {
+      if (settled) return;
+      finish({ data: null, aborted: true });
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+    req.on('close', onClose);
+    req.on('aborted', onAbort);
+  });
+}
+
+async function handleCollect(
+  req: MarpleRequest,
+  res: MarpleResponse,
+  storage: Driver,
+  config?: MarpleConfig,
+  limiter: RateLimiter = defaultRateLimiter
+): Promise<void> {
+  if (res.headersSent || res.writableEnded || res.destroyed) return;
+
+  try {
+    const activeConfig = config || storage.config;
+    const ip = getClientIp(req, activeConfig);
+    const limit = limiter.check(ip);
+    if (limit.limited) {
+      sendSafe(res, 429, 'Too Many Requests', {
+        'Content-Type': 'text/plain',
+        'Retry-After': String(limit.retryAfter)
+      });
       return;
     }
 
-    for (const ev of events) {
-      if (!ev.event_type) continue;
-      await storage.writeEvent({ ...ev, ip, ua, timestamp: new Date().toISOString() });
+    const rawUa = req.headers['user-agent'];
+    const ua = (Array.isArray(rawUa) ? rawUa[0] : rawUa) || '';
+    if (isbot(ua)) {
+      sendSafe(res, 204);
+      return;
     }
 
-    res.writeHead(204);
-    res.end();
-  } catch (e: any) {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: e.message }));
+    const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KB
+    const { data: payload, payloadTooLarge, aborted } = await readJsonBody(req, MAX_PAYLOAD_BYTES);
+
+    if (aborted || res.headersSent || res.writableEnded || res.destroyed) {
+      return;
+    }
+
+    if (payloadTooLarge) {
+      sendSafe(res, 413, 'Payload Too Large', {
+        'Content-Type': 'text/plain',
+        'Connection': 'close'
+      });
+      if (!req.destroyed && typeof req.destroy === 'function') {
+        req.destroy();
+      }
+      return;
+    }
+
+    let validatedEvents: IngestEvent[];
+    try {
+      validatedEvents = validateIngestBatch(payload);
+    } catch (err) {
+      if (err instanceof ValidationError) {
+        sendSafe(res, 400, JSON.stringify({ error: err.message, code: err.code }), {
+          'Content-Type': 'application/json'
+        });
+        return;
+      }
+      sendSafe(res, 400, JSON.stringify({ error: 'Invalid payload', code: 'INVALID_PAYLOAD' }), {
+        'Content-Type': 'application/json'
+      });
+      return;
+    }
+
+    let serverCountry: string | null = null;
+    const trustProxy = activeConfig?.trustProxy ?? false;
+    if (trustProxy !== false) {
+      let isPeerTrusted = true;
+      if (typeof trustProxy === 'string' || Array.isArray(trustProxy)) {
+        const directIp = normalizeIp(req.socket?.remoteAddress);
+        const trustedList = (Array.isArray(trustProxy) ? trustProxy : [trustProxy]).map(s => s.trim()).filter(Boolean);
+        isPeerTrusted = isIpTrusted(directIp, trustedList);
+      }
+      if (isPeerTrusted) {
+        const rawCountry = req.headers['cf-ipcountry'] || req.headers['x-country-code'] || req.headers['cloudfront-viewer-country'];
+        if (typeof rawCountry === 'string' && rawCountry.trim().length <= 16) {
+          serverCountry = rawCountry.trim().toUpperCase();
+        }
+      }
+    }
+
+    const serverTimestamp = new Date().toISOString();
+    for (const ev of validatedEvents) {
+      const country = serverCountry || (activeConfig?.trustClientCountry === true ? (ev.country || null) : null);
+      const sanitizedEvent: TrackEvent = {
+        ...ev,
+        ip,
+        ua,
+        country,
+        timestamp: serverTimestamp
+      };
+      await storage.writeEvent(sanitizedEvent);
+    }
+
+    sendSafe(res, 204);
+  } catch {
+    sendSafe(res, 400, JSON.stringify({ error: 'Bad Request', code: 'BAD_REQUEST' }), {
+      'Content-Type': 'application/json'
+    });
   }
 }
 
-async function handleApi(subPath: string, req: any, res: any, storage: Driver): Promise<void> {
-  const send = (data: any, status = 200) => {
-    res.writeHead(status, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(data));
+async function handleApi(subPath: string, req: MarpleRequest, res: MarpleResponse, storage: Driver): Promise<void> {
+  const method = (req.method || 'GET').toUpperCase();
+  const send = (data: unknown, status = 200, extraHeaders: Record<string, string> = {}) => {
+    sendSafe(res, status, JSON.stringify(data), { 'Content-Type': 'application/json', ...extraHeaders });
   };
-  const url = new URL(req.url, 'http://localhost');
+  const sendError = (status: number, message: string, code: string, extraHeaders: Record<string, string> = {}) => {
+    sendJsonError(res, status, message, code, extraHeaders);
+  };
+  const url = new URL(req.url || '/', 'http://localhost');
   const params = Object.fromEntries(url.searchParams);
 
   try {
-    if (subPath === '/overview')    return send(await storage.getOverview({ since: params.since, until: params.until, goal: params.goal || params.targetGoal }));
-    if (subPath === '/users')       return send(await storage.getUsers({ limit: +params.limit || 50, offset: +params.offset || 0 }));
+    if (subPath === '/funnel') {
+      if (method !== 'POST') {
+        return sendError(405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED', { 'Allow': 'POST' });
+      }
+      const { data: bodyData } = await readJsonBody(req, 8192);
+      if (!bodyData || typeof bodyData !== 'object' || Array.isArray(bodyData)) {
+        return sendError(400, 'Invalid request body', 'INVALID_BODY');
+      }
+      const rawBody = bodyData as Record<string, unknown>;
+      const { steps, since, until } = rawBody;
+
+      if (!steps || !Array.isArray(steps)) {
+        return sendError(400, 'Funnel requires an array of steps', 'INVALID_STEPS');
+      }
+      if (steps.length === 0) {
+        return send([]);
+      }
+      const normalizedSteps: FunnelStep[] = [];
+      for (const step of steps) {
+        if (!step || typeof step !== 'object' || Array.isArray(step)) {
+          return sendError(400, 'Invalid funnel step', 'INVALID_STEP');
+        }
+        const s = step as Record<string, unknown>;
+        const rawVal = typeof s.value === 'string' ? s.value : typeof s.name === 'string' ? s.name : undefined;
+        if (!rawVal || typeof rawVal !== 'string' || rawVal.trim().length === 0 || rawVal.length > 256) {
+          return sendError(400, 'Invalid funnel step', 'INVALID_STEP');
+        }
+        normalizedSteps.push({
+          label: typeof s.label === 'string' ? s.label : undefined,
+          name: typeof s.name === 'string' ? s.name : rawVal,
+          value: rawVal,
+          type: typeof s.type === 'string' ? s.type : undefined
+        });
+      }
+
+      let effectiveSince: string | undefined;
+      let effectiveUntil: string | undefined;
+
+      if (since !== undefined) {
+        if (typeof since !== 'string') return sendError(400, 'Invalid "since" parameter', 'INVALID_DATE');
+        effectiveSince = since;
+      } else if (params.since !== undefined) {
+        effectiveSince = params.since;
+      }
+
+      if (until !== undefined) {
+        if (typeof until !== 'string') return sendError(400, 'Invalid "until" parameter', 'INVALID_DATE');
+        effectiveUntil = until;
+      } else if (params.until !== undefined) {
+        effectiveUntil = params.until;
+      }
+
+      if (effectiveSince && isNaN(new Date(effectiveSince).getTime())) {
+        return sendError(400, 'Invalid "since" date range', 'INVALID_DATE');
+      }
+      if (effectiveUntil && isNaN(new Date(effectiveUntil).getTime())) {
+        return sendError(400, 'Invalid "until" date range', 'INVALID_DATE');
+      }
+      if (effectiveSince && effectiveUntil && new Date(effectiveSince).getTime() > new Date(effectiveUntil).getTime()) {
+        return sendError(400, '"since" must be earlier than or equal to "until"', 'INVALID_DATE_RANGE');
+      }
+
+      try {
+        const results = await storage.getFunnel(normalizedSteps, { since: effectiveSince, until: effectiveUntil });
+        return send(results);
+      } catch {
+        return sendError(500, 'Failed to compute funnel', 'FUNNEL_ERROR');
+      }
+    }
+
+    if (method !== 'GET' && method !== 'HEAD') {
+      return sendError(405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED', { 'Allow': 'GET, HEAD' });
+    }
+
+    const checkDateParams = () => {
+      if (params.since && isNaN(new Date(params.since).getTime())) {
+        sendError(400, 'Invalid "since" date parameter', 'INVALID_DATE');
+        return false;
+      }
+      if (params.until && isNaN(new Date(params.until).getTime())) {
+        sendError(400, 'Invalid "until" date parameter', 'INVALID_DATE');
+        return false;
+      }
+      if (params.since && params.until && new Date(params.since).getTime() > new Date(params.until).getTime()) {
+        sendError(400, '"since" must be earlier than or equal to "until"', 'INVALID_DATE_RANGE');
+        return false;
+      }
+      return true;
+    };
+
+    const targetGoal = params.goal || params.targetGoal;
+    if (targetGoal && (typeof targetGoal !== 'string' || targetGoal.length > 256)) {
+      return sendError(400, 'Goal parameter too long', 'INVALID_GOAL');
+    }
+
+    if (subPath === '/overview') {
+      if (!checkDateParams()) return;
+      return send(await storage.getOverview({ since: params.since, until: params.until, goal: targetGoal }));
+    }
+
+    if (subPath === '/users') {
+      let limit = 50;
+      if (params.limit !== undefined) {
+        const parsed = parseInt(params.limit, 10);
+        if (!Number.isNaN(parsed)) {
+          limit = Math.min(100, Math.max(1, parsed));
+        }
+      }
+      let offset = 0;
+      if (params.offset !== undefined) {
+        const parsed = parseInt(params.offset, 10);
+        if (!Number.isNaN(parsed)) {
+          offset = Math.max(0, parsed);
+        }
+      }
+      return send(await storage.getUsers({ limit, offset }));
+    }
+
     if (subPath === '/cohorts')     return send(typeof storage.getCohorts === 'function' ? await storage.getCohorts() : []);
-    if (subPath === '/events')      return send(typeof storage.getEvents === 'function' ? await storage.getEvents({ since: params.since, until: params.until }) : { events: [], trend: [] });
-    if (subPath === '/conversions' || subPath === '/goals') return send(typeof storage.getConversions === 'function' ? await storage.getConversions({ since: params.since, until: params.until, goal: params.goal || params.targetGoal }) : null);
+    if (subPath === '/events') {
+      if (!checkDateParams()) return;
+      return send(typeof storage.getEvents === 'function' ? await storage.getEvents({ since: params.since, until: params.until }) : { events: [], trend: [] });
+    }
+    if (subPath === '/conversions' || subPath === '/goals') {
+      if (!checkDateParams()) return;
+      return send(typeof storage.getConversions === 'function' ? await storage.getConversions({ since: params.since, until: params.until, goal: targetGoal }) : null);
+    }
     if (subPath === '/config')      return send(typeof storage.getPublicConfig === 'function' ? await storage.getPublicConfig() : getPublicConfig(storage.config || {}));
 
     if (subPath.startsWith('/users/')) {
       const userId = decodeURIComponent(subPath.slice('/users/'.length));
+      if (!userId || userId.length > 256 || /[\0\r\n]/.test(userId)) {
+        return sendError(400, 'Invalid user ID', 'INVALID_USER_ID');
+      }
       const profile = typeof storage.getUserProfile === 'function' ? await storage.getUserProfile(userId) : null;
-      return profile ? send(profile) : send({ error: 'Not found' }, 404);
+      return profile ? send(profile) : sendError(404, 'Not found', 'NOT_FOUND');
     }
 
-    if (subPath === '/funnel') {
-      let body = '';
-      await new Promise<void>(r => {
-        req.on('data', (c: any) => { body += c; if (body.length > 8192) body = ''; });
-        req.on('end', r);
-      });
-      const { steps } = JSON.parse(body || '{}') as { steps: FunnelStep[] };
-      return send(await storage.getFunnel(steps));
-    }
-
-    send({ error: 'Not found' }, 404);
-  } catch (e: any) {
-    send({ error: e.message }, 500);
+    sendError(404, 'Not found', 'NOT_FOUND');
+  } catch {
+    sendError(500, 'Internal Server Error', 'INTERNAL_ERROR');
   }
 }
 
@@ -163,7 +565,7 @@ function getClientSDK(): string {
 }
 
 export interface DashboardOptions {
-  authenticate: (req: any) => boolean | Promise<boolean>;
+  authenticate: (req: MarpleRequest) => boolean | Promise<boolean>;
   storage: Driver;
   config: MarpleConfig;
 }
@@ -171,28 +573,41 @@ export interface DashboardOptions {
 export function createDashboardMiddleware({ authenticate, storage, config }: DashboardOptions) {
   let dashboardHTML = getDashboardHTML();
   let clientSDK = getClientSDK();
+  const rateLimiter = new RateLimiter();
 
-  return async function marpleMiddleware(req: any, res: any, next?: any) {
+  return async function marpleMiddleware(req: MarpleRequest, res: MarpleResponse, next?: (err?: unknown) => void) {
     if (config?.dev) {
       dashboardHTML = getDashboardHTML();
       clientSDK = getClientSDK();
     }
-    const rawPath = req.url.split('?')[0].replace(/\/+$/, '') || '/';
+    const rawPath = (req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
+    const method = (req.method || 'GET').toUpperCase();
 
     if (rawPath === '/client.js' || rawPath.endsWith('/marple/client.js')) {
-      res.writeHead(200, { 'Content-Type': 'application/javascript', 'Cache-Control': 'public,max-age=3600' });
-      return res.end(clientSDK);
+      if (method !== 'GET' && method !== 'HEAD') {
+        sendJsonError(res, 405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED', { 'Allow': 'GET, HEAD' });
+        return;
+      }
+      sendSafe(res, 200, clientSDK, { 'Content-Type': 'application/javascript', 'Cache-Control': 'public,max-age=3600' });
+      return;
     }
 
     if (rawPath === '/collect' || rawPath.endsWith('/marple/collect')) {
-      return handleCollect(req, res, storage);
+      if (method !== 'POST') {
+        sendJsonError(res, 405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED', { 'Allow': 'POST' });
+        return;
+      }
+      return handleCollect(req, res, storage, config, rateLimiter);
     }
 
     let authed = false;
     try { authed = await authenticate(req); } catch { }
     if (!authed) {
-      res.writeHead(401, { 'Content-Type': 'text/plain', 'X-Robots-Tag': 'noindex' });
-      return res.end('Unauthorized — Marple requires authentication.');
+      sendSafe(res, 401, 'Unauthorized — Marple requires authentication.', {
+        'Content-Type': 'text/plain',
+        'X-Robots-Tag': 'noindex'
+      });
+      return;
     }
 
     const apiMatch = rawPath.match(/\/api(\/.*)?$/);
@@ -200,11 +615,15 @@ export function createDashboardMiddleware({ authenticate, storage, config }: Das
       return handleApi(apiMatch[1] || '/', req, res, storage);
     }
 
-    res.writeHead(200, {
+    if (method !== 'GET' && method !== 'HEAD') {
+      sendJsonError(res, 405, 'Method Not Allowed', 'METHOD_NOT_ALLOWED', { 'Allow': 'GET, HEAD' });
+      return;
+    }
+
+    sendSafe(res, 200, dashboardHTML, {
       'Content-Type': 'text/html; charset=utf-8',
       'X-Robots-Tag': 'noindex, nofollow',
       'Cache-Control': 'no-store'
     });
-    res.end(dashboardHTML);
   };
 }

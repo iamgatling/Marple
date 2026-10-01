@@ -10,16 +10,18 @@ import {
   GoalConversionData,
   UsersOptions,
   UsersData,
+  UserRecord,
   UserProfileData,
   FunnelStep,
   FunnelStepResult,
+  FunnelOptions,
   RollupConfig,
   MarpleConfig
 } from '../types.js';
 
 const require = createRequire(import.meta.url);
 
-function tryParse(str: string): Record<string, any> {
+function tryParse(str: string): Record<string, unknown> {
   try { return JSON.parse(str); } catch { return {}; }
 }
 
@@ -51,6 +53,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_evt_ts      ON events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_evt_uid     ON events(user_id);
 CREATE INDEX IF NOT EXISTS idx_evt_sid     ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_evt_sid_ts  ON events(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_evt_typ     ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_evt_utm_src ON events(utm_source);
 CREATE INDEX IF NOT EXISTS idx_evt_utm_med ON events(utm_medium);
@@ -72,8 +75,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   ua           TEXT,
   is_active    INTEGER DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_ses_uid ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_ses_ts  ON sessions(started_at);
+CREATE INDEX IF NOT EXISTS idx_ses_uid       ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_ses_ts        ON sessions(started_at);
+CREATE INDEX IF NOT EXISTS idx_ses_last_seen ON sessions(last_seen_at);
 
 CREATE TABLE IF NOT EXISTS users (
   id          TEXT PRIMARY KEY,
@@ -84,26 +88,40 @@ CREATE TABLE IF NOT EXISTS users (
   device_type TEXT,
   properties  TEXT DEFAULT '{}'
 );
+CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen);
 
 CREATE TABLE IF NOT EXISTS aggregated_metrics (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   date      TEXT NOT NULL,
   metric    TEXT NOT NULL,
-  dimension TEXT,
+  dimension TEXT DEFAULT '',
   value     INTEGER NOT NULL DEFAULT 0,
   UNIQUE(date, metric, dimension)
 );
 CREATE INDEX IF NOT EXISTS idx_agg_date ON aggregated_metrics(date);
 `;
 
-function dbAll(db: any, sql: string, p: any[] = []): Promise<any[]> {
-  return new Promise((res, rej) => db.all(sql, p, (e: Error | null, r: any[]) => e ? rej(e) : res(r || [])));
+interface SqliteRunResult {
+  lastID: number;
+  changes: number;
 }
-function dbGet(db: any, sql: string, p: any[] = []): Promise<any> {
-  return new Promise((res, rej) => db.get(sql, p, (e: Error | null, r: any) => e ? rej(e) : res(r || null)));
+
+interface SqliteDatabase {
+  all(sql: string, params: unknown[], callback: (err: Error | null, rows: unknown[]) => void): void;
+  get(sql: string, params: unknown[], callback: (err: Error | null, row: unknown) => void): void;
+  run(sql: string, params: unknown[], callback: (this: SqliteRunResult, err: Error | null) => void): void;
+  exec(sql: string, callback?: (err: Error | null) => void): void;
+  close(callback?: (err: Error | null) => void): void;
 }
-function dbRun(db: any, sql: string, p: any[] = []): Promise<any> {
-  return new Promise((res, rej) => db.run(sql, p, function(this: any, e: Error | null) { e ? rej(e) : res(this); }));
+
+function dbAll<T = unknown>(db: SqliteDatabase, sql: string, p: unknown[] = []): Promise<T[]> {
+  return new Promise((res, rej) => db.all(sql, p, (e: Error | null, r: unknown[]) => e ? rej(e) : res((r as T[]) || [])));
+}
+function dbGet<T = unknown>(db: SqliteDatabase, sql: string, p: unknown[] = []): Promise<T | null> {
+  return new Promise((res, rej) => db.get(sql, p, (e: Error | null, r: unknown) => e ? rej(e) : res((r as T) || null)));
+}
+function dbRun(db: SqliteDatabase, sql: string, p: unknown[] = []): Promise<SqliteRunResult> {
+  return new Promise((res, rej) => db.run(sql, p, function(this: SqliteRunResult, e: Error | null) { e ? rej(e) : res(this); }));
 }
 
 export default async function openSqliteStorage(config: MarpleConfig): Promise<Driver> {
@@ -117,6 +135,10 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
   for (const col of ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content']) {
     try { await dbRun(db, `ALTER TABLE events ADD COLUMN ${col} TEXT`); } catch {}
   }
+  try { await dbRun(db, `CREATE INDEX IF NOT EXISTS idx_ses_last_seen ON sessions(last_seen_at)`); } catch {}
+  try { await dbRun(db, `CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen)`); } catch {}
+  try { await dbRun(db, `CREATE INDEX IF NOT EXISTS idx_evt_sid_ts ON events(session_id, timestamp)`); } catch {}
+  try { await dbRun(db, `UPDATE aggregated_metrics SET dimension = '' WHERE dimension IS NULL`); } catch {}
 
   const storageObj: Driver = {
     async writeEvent(ev: TrackEvent): Promise<void> {
@@ -130,12 +152,14 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       const utm_term = ev.utm_term || utm.utm_term || null;
       const utm_content = ev.utm_content || utm.utm_content || null;
 
+      const timestamp = ev.timestamp || new Date().toISOString();
+
       await dbRun(db,
         `INSERT INTO events(event_type,session_id,user_id,url,referrer,properties,ip,ua,country,browser,device_type,timestamp,utm_source,utm_medium,utm_campaign,utm_term,utm_content)
          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [ev.event_type, ev.session_id, ev.user_id, ev.url, ev.referrer,
          JSON.stringify(ev.properties || {}), maskedIp, ev.ua, ev.country,
-         browser, device_type, ev.timestamp,
+         browser, device_type, timestamp,
          utm_source, utm_medium, utm_campaign, utm_term, utm_content]
       );
       if (ev.session_id) {
@@ -162,19 +186,19 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       const targetGoal = options.goal || options.targetGoal;
 
       const [totals, prevTotals, active, topPages, topReferrers, browsers, devices, countries, dailyViews, availGoals] = await Promise.all([
-        dbGet(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=? AND timestamp<=?`, [since, until]),
-        dbGet(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=? AND timestamp<?`, [prevSince, prevUntil]),
-        dbGet(db, `SELECT COUNT(*) as n FROM sessions WHERE last_seen_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-5 minutes')`),
-        dbAll(db, `SELECT url as page, COUNT(*) as views FROM events WHERE event_type='pageview' AND url IS NOT NULL AND timestamp>=? AND timestamp<=? GROUP BY url ORDER BY views DESC LIMIT 10`, [since, until]),
-        dbAll(db, `SELECT referrer, COUNT(*) as count FROM events WHERE referrer IS NOT NULL AND referrer!='' AND timestamp>=? AND timestamp<=? GROUP BY referrer ORDER BY count DESC LIMIT 10`, [since, until]),
-        dbAll(db, `SELECT browser, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND browser IS NOT NULL GROUP BY browser ORDER BY count DESC`, [since, until]),
-        dbAll(db, `SELECT device_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND device_type IS NOT NULL GROUP BY device_type ORDER BY count DESC`, [since, until]),
-        dbAll(db, `SELECT country, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND country IS NOT NULL AND country!='' GROUP BY country ORDER BY count DESC LIMIT 10`, [since, until]),
-        dbAll(db, `SELECT substr(timestamp,1,10) as date, COUNT(*) as views FROM events WHERE event_type='pageview' AND timestamp>=? AND timestamp<=? GROUP BY date ORDER BY date ASC`, [since, until]),
-        dbAll(db, `SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=? AND timestamp<=?`, [since, until]),
+        dbGet<{ te: number; us: number; uu: number }>(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=? AND timestamp<=?`, [since, until]),
+        dbGet<{ te: number; us: number; uu: number }>(db, `SELECT COUNT(*) as te, COUNT(DISTINCT session_id) as us, COUNT(DISTINCT user_id) as uu FROM events WHERE timestamp>=? AND timestamp<?`, [prevSince, prevUntil]),
+        dbGet<{ n: number }>(db, `SELECT COUNT(*) as n FROM sessions WHERE last_seen_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-5 minutes')`),
+        dbAll<{ page: string; views: number }>(db, `SELECT url as page, COUNT(*) as views FROM events WHERE event_type='pageview' AND url IS NOT NULL AND timestamp>=? AND timestamp<=? GROUP BY url ORDER BY views DESC LIMIT 10`, [since, until]),
+        dbAll<{ referrer: string; count: number }>(db, `SELECT referrer, COUNT(*) as count FROM events WHERE referrer IS NOT NULL AND referrer!='' AND timestamp>=? AND timestamp<=? GROUP BY referrer ORDER BY count DESC LIMIT 10`, [since, until]),
+        dbAll<{ browser: string; count: number }>(db, `SELECT browser, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND browser IS NOT NULL GROUP BY browser ORDER BY count DESC`, [since, until]),
+        dbAll<{ device_type: string; count: number }>(db, `SELECT device_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND device_type IS NOT NULL GROUP BY device_type ORDER BY count DESC`, [since, until]),
+        dbAll<{ country: string; count: number }>(db, `SELECT country, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND country IS NOT NULL AND country!='' GROUP BY country ORDER BY count DESC LIMIT 10`, [since, until]),
+        dbAll<{ date: string; views: number }>(db, `SELECT substr(timestamp,1,10) as date, COUNT(*) as views FROM events WHERE event_type='pageview' AND timestamp>=? AND timestamp<=? GROUP BY date ORDER BY date ASC`, [since, until]),
+        dbAll<{ event_type: string }>(db, `SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=? AND timestamp<=?`, [since, until]),
       ]);
 
-      const availableGoals = availGoals.map((r: any) => r.event_type);
+      const availableGoals = (availGoals as Array<{ event_type: string }>).map(r => r.event_type);
 
       let conversion: GoalConversionData | null = null;
       if (targetGoal) {
@@ -207,16 +231,16 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       const targetGoal = options.goal || options.targetGoal;
 
       const [totalSessionsRow, prevTotalSessionsRow] = await Promise.all([
-        dbGet(db, `SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=? AND timestamp<=?`, [since, until]),
-        dbGet(db, `SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=? AND timestamp<?`, [prevSince, prevUntil])
+        dbGet<{ us: number }>(db, `SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=? AND timestamp<=?`, [since, until]),
+        dbGet<{ us: number }>(db, `SELECT COUNT(DISTINCT session_id) as us FROM events WHERE timestamp>=? AND timestamp<?`, [prevSince, prevUntil])
       ]);
       const totalSessions = totalSessionsRow?.us || 1;
       const prevTotalSessions = prevTotalSessionsRow?.us || 1;
 
       async function calculateGoal(goalName: string): Promise<GoalConversionData> {
         const [currGoal, prevGoal] = await Promise.all([
-          dbGet(db, `SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=? AND timestamp>=? AND timestamp<=?`, [goalName, since, until]),
-          dbGet(db, `SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=? AND timestamp>=? AND timestamp<?`, [goalName, prevSince, prevUntil])
+          dbGet<{ count: number; uu: number; us: number }>(db, `SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=? AND timestamp>=? AND timestamp<=?`, [goalName, since, until]),
+          dbGet<{ count: number; uu: number; us: number }>(db, `SELECT COUNT(*) as count, COUNT(DISTINCT user_id) as uu, COUNT(DISTINCT session_id) as us FROM events WHERE event_type=? AND timestamp>=? AND timestamp<?`, [goalName, prevSince, prevUntil])
         ]);
         const count = currGoal?.count || 0;
         const uniqueUsers = currGoal?.uu || 0;
@@ -247,33 +271,41 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       if (targetGoal) {
         return await calculateGoal(targetGoal);
       } else {
-        const goalsList = await dbAll(db, `SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=? AND timestamp<=?`, [since, until]);
-        return await Promise.all(goalsList.map((g: any) => calculateGoal(g.event_type)));
+        const goalsList = await dbAll<{ event_type: string }>(db, `SELECT DISTINCT event_type FROM events WHERE event_type!='pageview' AND timestamp>=? AND timestamp<=?`, [since, until]);
+        return await Promise.all(goalsList.map(g => calculateGoal(g.event_type)));
       }
     },
 
     async getUsers({ limit = 50, offset = 0 }: UsersOptions = {}): Promise<UsersData> {
-      const users = await dbAll(db,
+      const users = await dbAll<UserRecord>(db,
         `SELECT u.id, u.first_seen, u.last_seen, u.country, u.browser, u.device_type, COUNT(e.id) as event_count
          FROM users u LEFT JOIN events e ON e.user_id=u.id GROUP BY u.id ORDER BY u.last_seen DESC LIMIT ? OFFSET ?`,
         [limit, offset]
       );
-      const totalRow = await dbGet(db, `SELECT COUNT(*) as n FROM users`);
+      const totalRow = await dbGet<{ n: number }>(db, `SELECT COUNT(*) as n FROM users`);
       const total = totalRow?.n || 0;
       return { users, total };
     },
 
     async getUserProfile(userId: string): Promise<UserProfileData | null> {
-      const user = await dbGet(db, `SELECT * FROM users WHERE id=?`, [userId]);
+      const user = await dbGet<UserRecord>(db, `SELECT * FROM users WHERE id=?`, [userId]);
       if (!user) return null;
-      const events = await dbAll(db,
+      const events = await dbAll<Record<string, unknown>>(db,
         `SELECT event_type, url, properties, timestamp FROM events WHERE user_id=? ORDER BY timestamp DESC LIMIT 100`,
         [userId]
       );
-      return { user, events: events.map((e: any) => ({ ...e, properties: tryParse(e.properties) })) };
+      return {
+        user,
+        events: events.map(e => ({
+          event_type: String(e.event_type || ''),
+          url: e.url ? String(e.url) : null,
+          properties: tryParse(String(e.properties || '{}')),
+          timestamp: String(e.timestamp || '')
+        }))
+      };
     },
 
-    async getCohorts(): Promise<any[]> {
+    async getCohorts(): Promise<unknown[]> {
       return dbAll(db, `
         WITH base AS (
           SELECT id, strftime('%Y-W%W', first_seen) as cohort_week, first_seen FROM users
@@ -292,60 +324,152 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
       `);
     },
 
-    async getEvents(options: OverviewOptions = {}): Promise<any> {
+    async getEvents(options: OverviewOptions = {}): Promise<unknown> {
       const { since, until, prevSince, prevUntil } = normalizeDateRange(options.since, options.until);
       const [events, prevEvents, trend] = await Promise.all([
-        dbAll(db, `SELECT event_type, COUNT(*) as count, COUNT(DISTINCT user_id) as unique_users FROM events WHERE timestamp>=? AND timestamp<=? AND event_type!='pageview' GROUP BY event_type ORDER BY count DESC`, [since, until]),
-        dbAll(db, `SELECT event_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<? AND event_type!='pageview' GROUP BY event_type`, [prevSince, prevUntil]),
-        dbAll(db, `SELECT event_type, substr(timestamp,1,10) as date, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [since, until]),
+        dbAll<{ event_type: string; count: number; unique_users: number }>(db, `SELECT event_type, COUNT(*) as count, COUNT(DISTINCT user_id) as unique_users FROM events WHERE timestamp>=? AND timestamp<=? AND event_type!='pageview' GROUP BY event_type ORDER BY count DESC`, [since, until]),
+        dbAll<{ event_type: string; count: number }>(db, `SELECT event_type, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<? AND event_type!='pageview' GROUP BY event_type`, [prevSince, prevUntil]),
+        dbAll<{ event_type: string; date: string; count: number }>(db, `SELECT event_type, substr(timestamp,1,10) as date, COUNT(*) as count FROM events WHERE timestamp>=? AND timestamp<=? AND event_type!='pageview' GROUP BY event_type, date ORDER BY date ASC`, [since, until]),
       ]);
-      const prevMap = Object.fromEntries(prevEvents.map((e: any) => [e.event_type, e.count]));
-      return { events: events.map((e: any) => ({ ...e, prev_count: prevMap[e.event_type] || 0 })), trend };
+      const prevMap = Object.fromEntries(prevEvents.map(e => [e.event_type, e.count]));
+      return { events: events.map(e => ({ ...e, prev_count: prevMap[e.event_type] || 0 })), trend };
     },
 
-    async getFunnel(steps: FunnelStep[]): Promise<FunnelStepResult[]> {
-      if (!steps || steps.length < 2) return [];
-      const results: FunnelStepResult[] = [];
-      let prevCount: number | null = null;
-      let sessionFilter = '';
-      let filterParams: string[] = [];
+    async getFunnel(steps: FunnelStep[], options?: FunnelOptions): Promise<FunnelStepResult[]> {
+      if (!steps || steps.length === 0) return [];
 
-      for (const step of steps) {
-        let count: number;
-        if (sessionFilter === '') {
-          const row = step.type === 'pageview'
-            ? await dbGet(db, `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type='pageview' AND url LIKE ?`, [`%${step.value}%`])
-            : await dbGet(db, `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type=?`, [step.value]);
-          count = row?.count || 0;
-        } else {
-          const row = step.type === 'pageview'
-            ? await dbGet(db, `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type='pageview' AND url LIKE ? AND session_id IN (${sessionFilter})`, [`%${step.value}%`, ...filterParams])
-            : await dbGet(db, `SELECT COUNT(DISTINCT session_id) as count FROM events WHERE event_type=? AND session_id IN (${sessionFilter})`, [step.value, ...filterParams]);
-          count = row?.count || 0;
+      if (options?.since && isNaN(new Date(options.since).getTime())) {
+        throw new Error('Invalid "since" date');
+      }
+      if (options?.until && isNaN(new Date(options.until).getTime())) {
+        throw new Error('Invalid "until" date');
+      }
+      if (options?.since && options?.until && new Date(options.since).getTime() > new Date(options.until).getTime()) {
+        throw new Error('"since" date must be earlier than or equal to "until" date');
+      }
+
+      const cteClauses: string[] = [];
+      const params: unknown[] = [];
+
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        const pfx = i === 0 ? '' : 'e.';
+        const clauses: string[] = [
+          `${pfx}session_id IS NOT NULL`,
+          `${pfx}session_id != ''`
+        ];
+
+        if (options?.since) {
+          clauses.push(`${pfx}timestamp >= ?`);
+          params.push(options.since);
         }
-
-        results.push({ step: step.label || step.value, count, dropoff: prevCount !== null ? Math.round((1 - count / (prevCount || 1)) * 100) : 0 });
-        prevCount = count;
+        if (options?.until) {
+          clauses.push(`${pfx}timestamp <= ?`);
+          params.push(options.until);
+        }
 
         if (step.type === 'pageview') {
-          sessionFilter = sessionFilter === '' ? `SELECT session_id FROM events WHERE event_type='pageview' AND url LIKE ?` : `SELECT session_id FROM events WHERE event_type='pageview' AND url LIKE ? AND session_id IN (${sessionFilter})`;
-          filterParams.push(`%${step.value}%`);
+          clauses.push(`${pfx}event_type = 'pageview'`);
+          clauses.push(`${pfx}url LIKE ?`);
+          params.push(`%${step.value}%`);
         } else {
-          sessionFilter = sessionFilter === '' ? `SELECT session_id FROM events WHERE event_type=?` : `SELECT session_id FROM events WHERE event_type=? AND session_id IN (${sessionFilter})`;
-          filterParams.push(step.value);
+          clauses.push(`${pfx}event_type = ?`);
+          params.push(step.value);
+        }
+
+        if (i === 0) {
+          cteClauses.push(`
+            step_0 AS (
+              SELECT session_id, MIN(timestamp) as ts
+              FROM events
+              WHERE ${clauses.join(' AND ')}
+              GROUP BY session_id
+            )
+          `);
+        } else {
+          const prev = `step_${i - 1}`;
+          cteClauses.push(`
+            step_${i} AS (
+              SELECT e.session_id, MIN(e.timestamp) as ts
+              FROM events e
+              JOIN ${prev} ON e.session_id = ${prev}.session_id
+              WHERE e.timestamp > ${prev}.ts
+                AND ${clauses.join(' AND ')}
+              GROUP BY e.session_id
+            )
+          `);
         }
       }
+
+      const selectCols = steps.map((_, i) => `(SELECT COUNT(*) FROM step_${i}) as c_${i}`).join(', ');
+      const sql = `WITH ${cteClauses.join(', ')} SELECT ${selectCols}`;
+      const row = await dbGet<Record<string, unknown>>(db, sql, params);
+
+      let prevCount: number | null = null;
+      const results: FunnelStepResult[] = [];
+
+      for (let i = 0; i < steps.length; i++) {
+        const count = Number(row?.[`c_${i}`] || 0);
+        const dropoff = prevCount !== null && prevCount > 0
+          ? Math.round((1 - count / prevCount) * 100)
+          : 0;
+
+        results.push({
+          step: steps[i].label || steps[i].value || steps[i].name || '',
+          count,
+          dropoff
+        });
+        prevCount = count;
+      }
+
       return results;
     },
 
     async runRollup(cfg?: RollupConfig): Promise<void> {
       const cutoffDays = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
-      const cutoff = cutoffDays(cfg?.keepRawEventsDays || 30);
-      await dbRun(db, `INSERT OR REPLACE INTO aggregated_metrics(date,metric,dimension,value) SELECT substr(timestamp,1,10),'pageviews',NULL,COUNT(*) FROM events WHERE event_type='pageview' AND timestamp<? GROUP BY substr(timestamp,1,10)`, [cutoff]);
-      await dbRun(db, `INSERT OR REPLACE INTO aggregated_metrics(date,metric,dimension,value) SELECT substr(timestamp,1,10),event_type,NULL,COUNT(*) FROM events WHERE event_type!='pageview' AND timestamp<? GROUP BY event_type, substr(timestamp,1,10)`, [cutoff]);
-      await dbRun(db, `DELETE FROM events WHERE timestamp<?`, [cutoff]);
-      const rollupCutoff = cutoffDays(cfg?.keepRollupsDays || 365);
-      await dbRun(db, `DELETE FROM aggregated_metrics WHERE date<?`, [rollupCutoff]);
+      const cutoff = cutoffDays(cfg?.keepRawEventsDays ?? 30);
+      const rollupCutoff = cutoffDays(cfg?.keepRollupsDays ?? 365);
+
+      await dbRun(db, 'BEGIN IMMEDIATE');
+      try {
+        await dbRun(
+          db,
+          `INSERT INTO aggregated_metrics(date, metric, dimension, value)
+           SELECT substr(timestamp, 1, 10), 'pageviews', '', COUNT(*)
+           FROM events
+           WHERE event_type = 'pageview' AND timestamp < ?
+           GROUP BY substr(timestamp, 1, 10)
+           ON CONFLICT(date, metric, dimension) DO UPDATE SET value = aggregated_metrics.value + excluded.value`,
+          [cutoff]
+        );
+
+        await dbRun(
+          db,
+          `INSERT INTO aggregated_metrics(date, metric, dimension, value)
+           SELECT substr(timestamp, 1, 10), event_type, '', COUNT(*)
+           FROM events
+           WHERE event_type != 'pageview' AND timestamp < ?
+           GROUP BY event_type, substr(timestamp, 1, 10)
+           ON CONFLICT(date, metric, dimension) DO UPDATE SET value = aggregated_metrics.value + excluded.value`,
+          [cutoff]
+        );
+
+        await dbRun(db, `DELETE FROM events WHERE timestamp < ?`, [cutoff]);
+        await dbRun(db, `DELETE FROM sessions WHERE last_seen_at < ?`, [cutoff]);
+        await dbRun(
+          db,
+          `DELETE FROM users
+           WHERE last_seen < ?
+             AND id NOT IN (SELECT DISTINCT user_id FROM events WHERE user_id IS NOT NULL)`,
+          [cutoff]
+        );
+        await dbRun(db, `DELETE FROM aggregated_metrics WHERE date < ?`, [rollupCutoff]);
+
+        await dbRun(db, 'COMMIT');
+      } catch (err) {
+        await dbRun(db, 'ROLLBACK');
+        throw err;
+      }
     },
 
     getPublicConfig(): MarpleConfig {

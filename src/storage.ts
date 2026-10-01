@@ -18,16 +18,65 @@ export function parseDevice(ua: string = ''): string {
 }
 
 export function maskIp(ip?: string | null): string | null {
-  if (!ip) return null;
-  if (ip.includes('.')) {
-    const p = ip.split('.');
-    if (p.length === 4) return `${p[0]}.${p[1]}.${p[2]}.0`;
+  if (!ip || typeof ip !== 'string') return null;
+  let clean = ip.trim();
+
+  if (clean.startsWith('[') && clean.includes(']')) {
+    clean = clean.replace(/^\[([^\]]+)\].*$/, '$1');
+  } else if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+$/.test(clean)) {
+    clean = clean.split(':')[0];
   }
-  if (ip.includes(':')) {
-    const p = ip.split(':');
-    if (p.length >= 3) return `${p[0]}:${p[1]}:${p[2]}::`;
+
+  if (clean.toLowerCase().startsWith('::ffff:')) {
+    const rest = clean.slice(7);
+    if (rest.includes('.')) {
+      clean = rest;
+    }
   }
-  return ip;
+
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(clean)) {
+    const parts = clean.split('.');
+    if (parts.length === 4) {
+      return `${parts[0]}.${parts[1]}.${parts[2]}.0`;
+    }
+  }
+
+  if (clean.includes(':')) {
+    const parts = clean.toLowerCase().split('::');
+    if (parts.length > 2) return null;
+
+    let left = parts[0] ? parts[0].split(':').filter(Boolean) : [];
+    let right = parts.length === 2 && parts[1] ? parts[1].split(':').filter(Boolean) : [];
+
+    if (right.length > 0 && right[right.length - 1].includes('.')) {
+      const v4 = right.pop()!;
+      const v4Parts = v4.split('.');
+      if (v4Parts.length === 4 && left.length === 1 && left[0] === 'ffff' && parts.length === 2 && parts[0] === '') {
+        return `${v4Parts[0]}.${v4Parts[1]}.${v4Parts[2]}.0`;
+      }
+    }
+
+    const missing = 8 - (left.length + right.length);
+    if (missing < 0) return null;
+
+    const middle = parts.length === 2 ? new Array(missing).fill('0') : [];
+    const full = [...left, ...middle, ...right];
+
+    if (full.length !== 8) return null;
+
+    const parsedHextets = full.slice(0, 3).map(h => {
+      const val = parseInt(h, 16);
+      return Number.isNaN(val) ? '0' : val.toString(16);
+    });
+
+    const [h0, h1, h2] = parsedHextets;
+    if (h0 === '0' && h1 === '0' && h2 === '0') return '::';
+    if (h1 === '0' && h2 === '0') return `${h0}::`;
+    if (h2 === '0') return `${h0}:${h1}::`;
+    return `${h0}:${h1}:${h2}::`;
+  }
+
+  return clean;
 }
 
 export interface UtmParams {
@@ -104,7 +153,7 @@ export function normalizeDateRange(sinceInput?: string, untilInput?: string): Da
   };
 }
 
-export function getPublicConfig(config: Record<string, any> = {}): Record<string, any> {
+export function getPublicConfig(config: Record<string, unknown> = {}): Record<string, unknown> {
   if (!config || typeof config !== 'object') return {};
 
   const SENSITIVE_KEYS = new Set([
@@ -136,12 +185,12 @@ export function getPublicConfig(config: Record<string, any> = {}): Record<string
     return false;
   }
 
-  function clean(obj: any): any {
+  function clean(obj: unknown): unknown {
     if (Array.isArray(obj)) {
       return obj.map(clean);
     }
     if (obj && typeof obj === 'object' && obj.constructor === Object) {
-      const result: Record<string, any> = {};
+      const result: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(obj)) {
         if (!isSensitiveKey(k)) {
           result[k] = clean(v);
@@ -152,28 +201,29 @@ export function getPublicConfig(config: Record<string, any> = {}): Record<string
     return obj;
   }
 
-  return clean(config);
+  return clean(config) as Record<string, unknown>;
 }
 
-/**
- * Unified Driver Interface Contract expects drivers to return a Driver object.
- */
+function isDriver(val: unknown): val is Driver {
+  return typeof val === 'object' && val !== null && typeof (val as Driver).writeEvent === 'function';
+}
+
 export async function openStorage(config: MarpleConfig): Promise<Driver> {
-  // Branch A: Custom Direct Object
-  if (config.storage && typeof config.storage === 'object' && typeof (config.storage as any).writeEvent === 'function') {
-    const customDriver = config.storage as Driver;
+  if (config.storage && isDriver(config.storage)) {
+    const customDriver = config.storage;
     if (typeof customDriver.getPublicConfig !== 'function') {
       customDriver.getPublicConfig = function() {
-        return getPublicConfig(customDriver.config || config);
+        return getPublicConfig((customDriver.config || config) as Record<string, unknown>);
       };
     }
     return customDriver;
   }
 
-  // Branch B: config object with type or string
   const storageType = typeof config.storage === 'string'
     ? config.storage
-    : (typeof config.storage === 'object' && (config.storage as any)?.type ? (config.storage as any).type : 'sqlite');
+    : (typeof config.storage === 'object' && config.storage !== null && typeof (config.storage as { type?: unknown }).type === 'string'
+        ? (config.storage as { type: string }).type
+        : 'sqlite');
 
   if (storageType === 'postgres') {
     const { default: openPostgresStorage } = await import('./drivers/postgres.js');

@@ -4,7 +4,7 @@ export interface TrackEvent {
   user_id?: string | null;
   url?: string | null;
   referrer?: string | null;
-  properties?: Record<string, any>;
+  properties?: Record<string, unknown>;
   ip?: string | null;
   ua?: string | null;
   country?: string | null;
@@ -14,7 +14,6 @@ export interface TrackEvent {
   utm_campaign?: string | null;
   utm_term?: string | null;
   utm_content?: string | null;
-  [key: string]: any;
 }
 
 export interface OverviewOptions {
@@ -71,7 +70,7 @@ export interface UserRecord {
   browser?: string | null;
   device_type?: string | null;
   event_count?: number;
-  properties?: Record<string, any>;
+  properties?: Record<string, unknown>;
 }
 
 export interface UsersData {
@@ -84,14 +83,15 @@ export interface UserProfileData {
   events: Array<{
     event_type: string;
     url?: string | null;
-    properties: Record<string, any>;
+    properties: Record<string, unknown>;
     timestamp: string;
   }>;
 }
 
 export interface FunnelStep {
-  type: string;
-  value: string;
+  type?: string;
+  value?: string;
+  name?: string;
   label?: string;
 }
 
@@ -101,6 +101,11 @@ export interface FunnelStepResult {
   dropoff: number;
 }
 
+export interface FunnelOptions {
+  since?: string;
+  until?: string;
+}
+
 export interface RollupConfig {
   keepRawEventsDays?: number;
   keepRollupsDays?: number;
@@ -108,14 +113,16 @@ export interface RollupConfig {
 }
 
 export interface MarpleConfig {
-  storage?: string | Driver | { type?: string; [key: string]: any };
+  storage?: string | Driver | { type?: string; [key: string]: unknown };
   sqlitePath?: string;
   postgresConnectionString?: string;
   connectionString?: string;
   retention?: RollupConfig;
+  trustProxy?: boolean | number | string | string[];
+  trustClientCountry?: boolean;
   dev?: boolean;
   dashboardPath?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface Driver {
@@ -123,10 +130,10 @@ export interface Driver {
   writeEvent(ev: TrackEvent): Promise<void>;
   getOverview(options?: OverviewOptions): Promise<OverviewData>;
   getUsers(options?: UsersOptions): Promise<UsersData>;
-  getFunnel(steps: FunnelStep[]): Promise<FunnelStepResult[]>;
+  getFunnel(steps: FunnelStep[], options?: FunnelOptions): Promise<FunnelStepResult[]>;
   getUserProfile?(userId: string): Promise<UserProfileData | null>;
-  getCohorts?(): Promise<any[]>;
-  getEvents?(options?: OverviewOptions): Promise<any>;
+  getCohorts?(): Promise<unknown[]>;
+  getEvents?(options?: OverviewOptions): Promise<unknown>;
   getConversions?(options?: OverviewOptions): Promise<GoalConversionData[] | GoalConversionData | null>;
   runRollup?(config?: RollupConfig): Promise<void>;
   getPublicConfig?(): MarpleConfig | Promise<MarpleConfig>;
