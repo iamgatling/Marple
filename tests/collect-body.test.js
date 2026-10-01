@@ -263,19 +263,47 @@ describe('/collect Body Handling Safety & Boundaries', () => {
     });
 
     let childExited = false;
+    let stderrBuf = '';
+    child.stderr.on('data', (d) => {
+      stderrBuf += d.toString();
+    });
     child.on('exit', () => {
       childExited = true;
     });
 
     const port = await new Promise((resolve, reject) => {
       let buf = '';
-      child.stdout.on('data', (d) => {
+      const onData = (d) => {
         buf += d.toString();
         const match = buf.match(/PORT:(\d+)/);
-        if (match) resolve(parseInt(match[1], 10));
-      });
-      child.on('error', reject);
-      setTimeout(() => reject(new Error('Child process server timeout')), 5000);
+        if (match) {
+          cleanup();
+          resolve(parseInt(match[1], 10));
+        }
+      };
+      const onExit = (code) => {
+        cleanup();
+        reject(new Error(`Child exited early with code ${code}: ${stderrBuf}`));
+      };
+      const onError = (err) => {
+        cleanup();
+        reject(err);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('Child process server timeout'));
+      }, 5000);
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        child.stdout.removeListener('data', onData);
+        child.removeListener('exit', onExit);
+        child.removeListener('error', onError);
+      };
+
+      child.stdout.on('data', onData);
+      child.on('exit', onExit);
+      child.on('error', onError);
     });
 
     try {
@@ -294,7 +322,9 @@ describe('/collect Body Handling Safety & Boundaries', () => {
       assert.strictEqual(healthRes.status, 200);
       assert.strictEqual(childExited, false);
     } finally {
-      child.kill('SIGTERM');
+      try {
+        child.kill('SIGKILL');
+      } catch {}
     }
   });
 });

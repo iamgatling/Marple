@@ -6,7 +6,7 @@ import { isbot } from 'isbot';
 import { getPublicConfig } from './storage.js';
 import { Driver, MarpleConfig, TrackEvent, FunnelStep } from './types.js';
 import { validateIngestBatch, ValidationError, IngestEvent } from './validation.js';
-import { getClientIp } from './proxy.js';
+import { getClientIp, isIpTrusted, normalizeIp } from './proxy.js';
 
 export type MarpleRequest = IncomingMessage & {
   body?: unknown;
@@ -341,16 +341,31 @@ async function handleCollect(
       return;
     }
 
-    const rawCountry = req.headers['cf-ipcountry'] || req.headers['x-country-code'] || req.headers['cloudfront-viewer-country'];
-    const serverCountry = typeof rawCountry === 'string' && rawCountry.trim().length <= 16 ? rawCountry.trim().toUpperCase() : null;
+    let serverCountry: string | null = null;
+    const trustProxy = activeConfig?.trustProxy ?? false;
+    if (trustProxy !== false) {
+      let isPeerTrusted = true;
+      if (typeof trustProxy === 'string' || Array.isArray(trustProxy)) {
+        const directIp = normalizeIp(req.socket?.remoteAddress);
+        const trustedList = (Array.isArray(trustProxy) ? trustProxy : [trustProxy]).map(s => s.trim()).filter(Boolean);
+        isPeerTrusted = isIpTrusted(directIp, trustedList);
+      }
+      if (isPeerTrusted) {
+        const rawCountry = req.headers['cf-ipcountry'] || req.headers['x-country-code'] || req.headers['cloudfront-viewer-country'];
+        if (typeof rawCountry === 'string' && rawCountry.trim().length <= 16) {
+          serverCountry = rawCountry.trim().toUpperCase();
+        }
+      }
+    }
 
     const serverTimestamp = new Date().toISOString();
     for (const ev of validatedEvents) {
+      const country = serverCountry || (activeConfig?.trustClientCountry === true ? (ev.country || null) : null);
       const sanitizedEvent: TrackEvent = {
         ...ev,
         ip,
         ua,
-        country: serverCountry || ev.country || null,
+        country,
         timestamp: serverTimestamp
       };
       await storage.writeEvent(sanitizedEvent);

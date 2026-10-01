@@ -119,6 +119,7 @@ export interface MarpleConfig {
   connectionString?: string;
   retention?: RollupConfig;
   trustProxy?: boolean | number | string | string[];
+  trustClientCountry?: boolean;
   dev?: boolean;
   dashboardPath?: string;
   [key: string]: unknown;

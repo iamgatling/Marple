@@ -18,14 +18,35 @@ export function createTestServer(app) {
 
       const close = () => {
         return new Promise((res) => {
-          if (typeof server.closeAllConnections === 'function') {
-            server.closeAllConnections();
+          let done = false;
+          const finish = () => {
+            if (!done) {
+              done = true;
+              try { server.unref(); } catch {}
+              res();
+            }
+          };
+          const timer = setTimeout(finish, 500);
+          timer.unref();
+          try {
+            if (typeof server.closeAllConnections === 'function') {
+              server.closeAllConnections();
+            }
+            if (typeof server.closeIdleConnections === 'function') {
+              server.closeIdleConnections();
+            }
+            for (const socket of sockets) {
+              try { socket.destroy(); } catch {}
+            }
+            sockets.clear();
+            server.close(() => {
+              clearTimeout(timer);
+              finish();
+            });
+          } catch {
+            clearTimeout(timer);
+            finish();
           }
-          for (const socket of sockets) {
-            socket.destroy();
-          }
-          sockets.clear();
-          server.close(() => res());
         });
       };
 

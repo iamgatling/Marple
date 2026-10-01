@@ -328,7 +328,8 @@ await marple.init({
 });
 ```
 
-> **Security Note on Numeric Hop Counts**: A numeric `trustProxy` setting (such as `1` or `2`) relies on the upstream network architecture ensuring that connections only arrive from your trusted reverse proxies. If your Node process is directly accessible by public clients, use an IP/CIDR allowlist mode instead to verify the direct peer socket address.
+> [!WARNING]
+> **Security Warning on Numeric Hop Counts (`trustProxy: 1` or `2`)**: Numeric hop count mode trusts `X-Forwarded-For` unconditionally from whatever socket connects to your Node process. This is ONLY safe if your Node server is deployed in a private network where only your trusted reverse proxy can connect, and where that proxy strips and overwrites any incoming client forwarded headers. If public clients can connect directly to your Node port, numeric hop mode allows trivial IP and rate-limit spoofing. In publicly reachable or multi-tenant environments, ALWAYS use an IP or CIDR allowlist (`trustProxy: ['127.0.0.1', '10.0.0.0/8', ...]`) to verify the direct peer socket address.
 
 ---
 
@@ -349,7 +350,7 @@ Marple is designed to comply with privacy frameworks (such as GDPR and ePrivacy)
 ## Security & Trust Boundaries
 
 - **Identity & Attribution Boundaries**: Client-provided `user_id` and `session_id` are unauthenticated browser tokens (pseudonymous client-controlled labels), NOT verified identities. They are subject to strict shape and length validation, but must never be used as trusted credentials or access control tokens.
-- **Server-Derived Geolocation**: Ingestion checks for trusted reverse proxy geolocation headers (`cf-ipcountry`, `x-country-code`, `cloudfront-viewer-country`) and prioritizes them over unauthenticated client-reported country values.
+- **Server-Derived Geolocation**: To prevent spoofing, client-provided `country` in `/collect` payloads is ignored by default (`country: null`). Geolocation is resolved strictly from trusted reverse proxy headers (`cf-ipcountry`, `x-country-code`, `cloudfront-viewer-country`) only when `trustProxy` is enabled and the connecting peer is verified. If you intentionally rely on client-reported countries (e.g. within an intranet or behind custom middleware), you may opt-in via `trustClientCountry: true` in your `MarpleConfig`.
 - **Bounded Stream Parsing**: The `/collect` ingestion endpoint bounds raw incoming chunks and terminates parsing with `413 Payload Too Large` if requests exceed 64 KB, safely handling aborted streams, unconsumed buffers, and preventing memory exhaustion.
 - **Safe Public Error Boundaries**: Internal exception messages, storage failures, and database queries are never leaked to public or unauthenticated callers. Errors are returned as stable, typed codes (`BAD_REQUEST`, `INVALID_PAYLOAD`, `INVALID_STEPS`, `FUNNEL_ERROR`, `INTERNAL_ERROR`).
 - **Strict Ingestion Schema**: All event properties are validated against size and depth constraints (maximum 50 events per batch, property recursion depth limit of 3, key count limit of 50, serialized size limit of 16 KB). Malformed items or invalid structures return `400 Bad Request`.

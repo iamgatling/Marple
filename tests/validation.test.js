@@ -9,10 +9,11 @@ import { LIMITS } from '../dist/validation.js';
 describe('Public Event Ingestion Validation & Schema', () => {
   let serverHelper;
   let writtenEvents;
+  const activeConfig = {};
 
   const mockStorage = {
     writeEvent: async (ev) => { writtenEvents.push(ev); },
-    config: {}
+    config: activeConfig
   };
 
   before(async () => {
@@ -22,7 +23,7 @@ describe('Public Event Ingestion Validation & Schema', () => {
     app.use(createDashboardMiddleware({
       authenticate: () => true,
       storage: mockStorage,
-      config: {}
+      config: activeConfig
     }));
     serverHelper = await createTestServer(app);
   });
@@ -230,9 +231,70 @@ describe('Public Event Ingestion Validation & Schema', () => {
     assert.strictEqual(stored.user_id, 'usr_anon_456');
     assert.strictEqual(stored.url, 'https://example.com/pricing');
     assert.strictEqual(stored.referrer, 'https://google.com/');
-    assert.strictEqual(stored.country, 'US');
+    assert.strictEqual(stored.country, null);
     assert.strictEqual(stored.utm_source, 'newsletter');
     assert.deepStrictEqual(stored.properties, { theme: 'dark', path: '/pricing', step: 1 });
+  });
+
+  test('ignores client-supplied country by default to prevent spoofing', async () => {
+    writtenEvents.length = 0;
+    const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
+      method: 'POST',
+      headers: {
+        'x-country-code': 'RU'
+      },
+      body: {
+        event_type: 'geo_test',
+        country: 'US'
+      }
+    });
+
+    assert.strictEqual(res.status, 204);
+    assert.strictEqual(writtenEvents.length, 1);
+    assert.strictEqual(writtenEvents[0].country, null);
+  });
+
+  test('accepts client-supplied country when trustClientCountry is explicitly enabled', async () => {
+    writtenEvents.length = 0;
+    activeConfig.trustClientCountry = true;
+    try {
+      const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
+        method: 'POST',
+        body: {
+          event_type: 'trusted_client_geo',
+          country: 'GB'
+        }
+      });
+
+      assert.strictEqual(res.status, 204);
+      assert.strictEqual(writtenEvents.length, 1);
+      assert.strictEqual(writtenEvents[0].country, 'GB');
+    } finally {
+      delete activeConfig.trustClientCountry;
+    }
+  });
+
+  test('accepts proxy country header when trustProxy is enabled', async () => {
+    writtenEvents.length = 0;
+    activeConfig.trustProxy = true;
+    try {
+      const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
+        method: 'POST',
+        headers: {
+          'cf-ipcountry': 'fr'
+        },
+        body: {
+          event_type: 'proxy_geo_test',
+          country: 'US'
+        }
+      });
+
+      assert.strictEqual(res.status, 204);
+      assert.strictEqual(writtenEvents.length, 1);
+      assert.strictEqual(writtenEvents[0].country, 'FR');
+    } finally {
+      delete activeConfig.trustProxy;
+    }
   });
 
   test('rejects entire batch when any entry is invalid', async () => {
