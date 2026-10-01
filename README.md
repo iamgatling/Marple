@@ -49,37 +49,50 @@ npx marple init
 
 ## Server Setup (Express)
 
+### ESM (`import`)
+
 ```js
 import express from 'express';
 import { marple } from 'marple';
 
 const app = express();
 
-// 1. Initialise Marple
 await marple.init({
-  storage: 'sqlite',              // 'sqlite' | 'postgres' | custom Driver
-  sqlitePath: './marple.sqlite',  // SQLite only; defaults to './marple.sqlite'
-
-  // PostgreSQL alternative:
-  // storage: 'postgres',
-  // connectionString: 'postgres://user:pass@localhost:5432/marple_db',
-
+  storage: 'sqlite',
+  sqlitePath: './marple.sqlite',
   retention: {
-    keepRawEventsDays: 30,   // Delete raw events older than 30 days
-    keepRollupsDays: 365,    // Delete aggregated metrics older than 365 days
-    autoRollup: true         // Run rollup automatically on init
+    keepRawEventsDays: 30,
+    keepRollupsDays: 365,
+    autoRollup: true
   }
 });
 
-// 2. Mount the dashboard (authentication is mandatory)
-// Compatible with global body parsers like express.json()
 app.use('/marple', marple.dashboard({
-  authenticate: async (req) => {
-    return req.session?.user?.isAdmin === true;
-  }
+  authenticate: async (req) => req.session?.user?.isAdmin === true
 }));
 
 app.listen(3000);
+```
+
+### CommonJS (`require`)
+
+Marple provides dual module output and works seamlessly in CommonJS projects:
+
+```js
+const express = require('express');
+const { marple } = require('marple');
+
+const app = express();
+
+marple.init({
+  storage: 'sqlite',
+  sqlitePath: './marple.sqlite'
+}).then(() => {
+  app.use('/marple', marple.dashboard({
+    authenticate: (req) => req.headers['x-auth-token'] === process.env.AUTH_TOKEN
+  }));
+  app.listen(3000);
+});
 ```
 
 ---
@@ -326,6 +339,31 @@ Marple is designed to comply with privacy frameworks (such as GDPR and ePrivacy)
   - **Compressed Notation**: Full support for `::` shorthand and bracketed notation with port numbers.
 - **Do Not Track & Global Privacy Control**: If `navigator.doNotTrack === '1'` or `navigator.globalPrivacyControl === true`, client event capture is completely disabled.
 - **No Third-Party Transmission**: Data stays entirely inside your chosen SQLite or PostgreSQL database.
+
+---
+
+## Security & Boundary Safeguards
+
+- **Bounded Stream Parsing**: The `/collect` ingestion endpoint bounds raw incoming chunks and terminates parsing with `413 Payload Too Large` if requests exceed 64 KB, safely handling aborted streams and preventing memory exhaustion.
+- **Strict Ingestion Schema**: All event properties are validated against size and depth constraints (maximum 50 events per batch, property recursion depth limit of 3, key count limit of 64). Malformed items or invalid structures return `400 Bad Request`.
+- **HTTP Method Enforcement**: Endpoints strictly enforce allowable HTTP methods. `/collect` and `/api/funnel` accept only `POST`; dashboard and other API endpoints accept only `GET` and `HEAD`. Any unauthorized method receives `405 Method Not Allowed` with an appropriate `Allow` response header.
+- **Security Headers**: Standard security headers are returned on all responses:
+  - `X-Content-Type-Options: nosniff`
+  - `X-Frame-Options: SAMEORIGIN`
+- **Rate Limiting**: `/collect` enforces a rolling limit of 100 requests per 60 seconds per resolved IP address. Exceeded limits yield `429 Too Many Requests` with a `Retry-After` header. The internal rate limiter automatically prunes stale keys and is bounded to prevent denial-of-service.
+- **Mandatory Dashboard Authentication**: All dashboard and administrative API routes require explicit authentication via developer-provided `authenticate(req)` function.
+
+---
+
+## Migration & Upgrade Guide
+
+### Upgrading to 2.3.0+
+
+- **Dual Module Output**: Marple exports both CommonJS (`main`: `./dist/cjs/index.js`) and ESM (`module`: `./dist/index.js`) via package `exports`. `require('marple')` and `require('marple/client')` work out-of-the-box without requiring experimental Node flags.
+- **Startup Data Rollups**: If `retention` is configured, automatic rollup is enabled by default (`autoRollup: true`). During `marple.init()`, old raw events, stale sessions, and orphaned users are pruned. Set `autoRollup: false` if you run rollups in a separate worker process.
+- **Reverse Proxy Configurations**: By default, `trustProxy` is `false`. If Marple is deployed behind a reverse proxy (e.g. Nginx, Cloudflare, AWS ALB), configure `trustProxy: true` (or the hop count) in your `marple.init()` options so rate limiting and persistence resolve the genuine client IP address.
+- **Strict Funnel Analysis**: Funnel steps are now evaluated in chronological order within each session. Events matching prior steps later in time will not erroneously match earlier steps. Date ranges (`since` and `until`) are validated and applied across all funnel steps.
+- **Generated Configuration Auto-Loading**: `marple.init()` automatically checks for and loads `marple.config.js` in the current working directory if no options are passed directly.
 
 ---
 
