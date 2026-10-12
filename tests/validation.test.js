@@ -127,7 +127,11 @@ describe('Public Event Ingestion Validation & Schema', () => {
       l1: {
         l2: {
           l3: {
-            l4: 'too_deep'
+            l4: {
+              l5: {
+                l6: 'too_deep'
+              }
+            }
           }
         }
       }
@@ -139,6 +143,25 @@ describe('Public Event Ingestion Validation & Schema', () => {
     assert.strictEqual(res.status, 400);
     assert.strictEqual(res.json().code, 'PROP_DEPTH_EXCEEDED');
     assert.strictEqual(writtenEvents.length, 0);
+  });
+
+  test('accepts 4-level nested properties within new depth limit', async () => {
+    writtenEvents.length = 0;
+    const nested4 = {
+      user: {
+        profile: {
+          preferences: {
+            theme: 'dark'
+          }
+        }
+      }
+    };
+    const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
+      method: 'POST',
+      body: { event_type: 'identify', properties: nested4 }
+    });
+    assert.strictEqual(res.status, 204);
+    assert.strictEqual(writtenEvents.length, 1);
   });
 
   test('rejects excessive property key count with 400', async () => {
@@ -297,11 +320,11 @@ describe('Public Event Ingestion Validation & Schema', () => {
     }
   });
 
-  test('rejects entire batch when any entry is invalid', async () => {
+  test('drops invalid events in batch and ingests valid ones', async () => {
     writtenEvents.length = 0;
     const batch = [
       { event_type: 'valid_1' },
-      { event_type: '' }, // invalid item
+      { event_type: '' }, // invalid item - should be dropped
       { event_type: 'valid_2' }
     ];
 
@@ -310,10 +333,44 @@ describe('Public Event Ingestion Validation & Schema', () => {
       body: batch
     });
 
+    assert.strictEqual(res.status, 204);
+    assert.strictEqual(res.headers['x-marple-dropped'], '1', 'X-Marple-Dropped header should report 1 dropped event');
+    assert.strictEqual(writtenEvents.length, 2);
+    assert.strictEqual(writtenEvents[0].event_type, 'valid_1');
+    assert.strictEqual(writtenEvents[1].event_type, 'valid_2');
+  });
+
+  test('ingests all valid events in batch without x-marple-dropped header', async () => {
+    writtenEvents.length = 0;
+    const batch = [
+      { event_type: 'valid_1' },
+      { event_type: 'valid_2' }
+    ];
+
+    const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
+      method: 'POST',
+      body: batch
+    });
+
+    assert.strictEqual(res.status, 204);
+    assert.strictEqual(res.headers['x-marple-dropped'], undefined);
+    assert.strictEqual(writtenEvents.length, 2);
+  });
+
+  test('rejects batch when all entries are invalid with 400', async () => {
+    writtenEvents.length = 0;
+    const batch = [
+      { event_type: '' },
+      { session_id: 123 }
+    ];
+
+    const res = await makeRequest(`${serverHelper.baseUrl}/collect`, {
+      method: 'POST',
+      body: batch
+    });
+
     assert.strictEqual(res.status, 400);
-    const parsed = res.json();
-    assert(parsed.error.includes('Batch item [1] invalid'));
-    assert.strictEqual(parsed.code, 'MISSING_EVENT_TYPE');
+    assert.strictEqual(res.headers['x-marple-dropped'], undefined, 'X-Marple-Dropped header should not be present on 400 rejection');
     assert.strictEqual(writtenEvents.length, 0);
   });
 });

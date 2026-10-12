@@ -61,6 +61,46 @@ interface TrackEvent {
     return sid;
   }
 
+  const MAX_STR_LEN = 4096;
+  const MAX_URL_LEN = 8192;
+  const MAX_KEY_LEN = 64;
+  const MAX_PROP_DEPTH = 5;
+
+  function truncateStr(str: string, maxLen: number): string;
+  function truncateStr(str: unknown, maxLen: number): string | null;
+  function truncateStr(str: unknown, maxLen: number): string | null {
+    if (typeof str !== 'string') return null;
+    return str.length > maxLen ? str.slice(0, maxLen) : str;
+  }
+
+  function sanitizeProps(obj: unknown, depth = 0): Record<string, unknown> {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj) || depth >= MAX_PROP_DEPTH) {
+      return {};
+    }
+    const result: Record<string, unknown> = {};
+    for (const [rawKey, v] of Object.entries(obj)) {
+      const k = rawKey.length > MAX_KEY_LEN ? rawKey.slice(0, MAX_KEY_LEN) : rawKey;
+      if (typeof v === 'string') {
+        result[k] = v.length > MAX_STR_LEN ? v.slice(0, MAX_STR_LEN) : v;
+      } else if (typeof v === 'number' || typeof v === 'boolean' || v === null) {
+        result[k] = v;
+      } else if (Array.isArray(v)) {
+        if (depth + 1 < MAX_PROP_DEPTH) {
+          result[k] = v.slice(0, 50).map(item => {
+            if (typeof item === 'string') return item.length > MAX_STR_LEN ? item.slice(0, MAX_STR_LEN) : item;
+            if (item && typeof item === 'object') return sanitizeProps(item, depth + 1);
+            return item;
+          });
+        }
+      } else if (typeof v === 'object') {
+        if (depth + 1 < MAX_PROP_DEPTH) {
+          result[k] = sanitizeProps(v, depth + 1);
+        }
+      }
+    }
+    return result;
+  }
+
   function flush(useBeacon?: boolean): void {
     if (isDNTEnabled() || _flushing || !eventQueue.length) return;
     _flushing = true;
@@ -70,27 +110,41 @@ interface TrackEvent {
       navigator.sendBeacon(_config.endpoint, new Blob([body], { type: 'application/json' }));
     } else {
       fetch(_config.endpoint, { method: 'POST', body, headers: { 'Content-Type': 'application/json' }, keepalive: true })
-        .catch(() => {});
+        .then((res) => {
+          if (!res.ok && typeof console !== 'undefined' && console.warn) {
+            console.warn(`[Marple] Failed to send events (${res.status})`);
+          }
+        })
+        .catch((err) => {
+          if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[Marple] Network error sending events', err);
+          }
+        });
     }
     setTimeout(() => { _flushing = false; }, 200);
   }
 
   function track(eventType: string, properties?: Record<string, unknown>): void {
     if (isDNTEnabled()) return;
+    const url = typeof window !== 'undefined' && window.location ? truncateStr(window.location.href, MAX_URL_LEN) : null;
+    const referrer = typeof document !== 'undefined' ? truncateStr(document.referrer, MAX_URL_LEN) : null;
     eventQueue.push({
-      event_type: eventType,
+      event_type: eventType.slice(0, 128),
       session_id: _config.sessionId,
       user_id: _config.userId,
-      url: window.location.href,
-      referrer: document.referrer || null,
-      properties: properties || {},
+      url,
+      referrer,
+      properties: sanitizeProps(properties),
       timestamp: new Date().toISOString()
     });
     if (eventQueue.length >= MAX_QUEUE) flush(false);
   }
 
   function trackPageview(): void {
-    track('pageview', { title: document.title });
+    const title = typeof document !== 'undefined' && document.title
+      ? truncateStr(document.title, MAX_STR_LEN)
+      : '';
+    track('pageview', { title });
   }
 
   function patchHistory(): void {
@@ -148,8 +202,8 @@ interface TrackEvent {
           const extMatch = cleanUrl.match(/\.([a-z0-9]+)$/i);
           const extension = extMatch ? extMatch[1].toLowerCase() : undefined;
           track('download', {
-            url: href,
-            href: href,
+            url: truncateStr(href, MAX_STR_LEN),
+            href: truncateStr(href, MAX_STR_LEN),
             extension: extension,
             target: anchor.target || undefined
           });
@@ -157,8 +211,8 @@ interface TrackEvent {
 
         if (isExternal) {
           track('outbound_click', {
-            url: href,
-            href: href,
+            url: truncateStr(href, MAX_STR_LEN),
+            href: truncateStr(href, MAX_STR_LEN),
             target: anchor.target || undefined
           });
         }
@@ -187,7 +241,9 @@ interface TrackEvent {
 
   function identify(userId: string, traits?: Record<string, unknown>): void {
     _config.userId = userId;
-    localStorage.setItem('_marple_uid', userId);
+    try {
+      localStorage.setItem('_marple_uid', userId);
+    } catch {}
     track('identify', traits || {});
   }
 

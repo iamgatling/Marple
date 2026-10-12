@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { isbot } from 'isbot';
 import { getPublicConfig } from './storage.js';
 import { Driver, MarpleConfig, TrackEvent, FunnelStep } from './types.js';
-import { validateIngestBatch, ValidationError, IngestEvent } from './validation.js';
+import { validateIngestBatch, ValidationError, IngestBatchResult, IngestEvent } from './validation.js';
 import { getClientIp, isIpTrusted, normalizeIp } from './proxy.js';
 
 export type MarpleRequest = IncomingMessage & {
@@ -325,9 +325,9 @@ async function handleCollect(
       return;
     }
 
-    let validatedEvents: IngestEvent[];
+    let batchResult: IngestBatchResult;
     try {
-      validatedEvents = validateIngestBatch(payload);
+      batchResult = validateIngestBatch(payload);
     } catch (err) {
       if (err instanceof ValidationError) {
         sendSafe(res, 400, JSON.stringify({ error: err.message, code: err.code }), {
@@ -359,7 +359,8 @@ async function handleCollect(
     }
 
     const serverTimestamp = new Date().toISOString();
-    for (const ev of validatedEvents) {
+    let writeErrors = 0;
+    for (const ev of batchResult.events) {
       const country = serverCountry || (activeConfig?.trustClientCountry === true ? (ev.country || null) : null);
       const sanitizedEvent: TrackEvent = {
         ...ev,
@@ -368,10 +369,24 @@ async function handleCollect(
         country,
         timestamp: serverTimestamp
       };
-      await storage.writeEvent(sanitizedEvent);
+      try {
+        await storage.writeEvent(sanitizedEvent);
+      } catch {
+        writeErrors++;
+      }
     }
 
-    sendSafe(res, 204);
+    const responseHeaders: Record<string, string> = {};
+    if (batchResult.dropped > 0) {
+      responseHeaders['X-Marple-Dropped'] = String(batchResult.dropped);
+    }
+    if (writeErrors > 0 && writeErrors === batchResult.events.length) {
+      sendSafe(res, 500, JSON.stringify({ error: 'Failed to store events', code: 'STORAGE_ERROR' }), {
+        'Content-Type': 'application/json'
+      });
+      return;
+    }
+    sendSafe(res, 204, undefined, responseHeaders);
   } catch {
     sendSafe(res, 400, JSON.stringify({ error: 'Bad Request', code: 'BAD_REQUEST' }), {
       'Content-Type': 'application/json'

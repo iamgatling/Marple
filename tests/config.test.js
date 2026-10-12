@@ -109,4 +109,61 @@ describe('Marple Configuration & CLI Usability', () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  test('merges config file options with programmatic options', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'marple-merge-config-'));
+    const configPath = path.join(tempDir, 'marple.config.js');
+    const customDbPath = path.join(tempDir, 'merged-custom.sqlite');
+
+    try {
+      fs.writeFileSync(
+        configPath,
+        `export default {
+          storage: 'sqlite',
+          sqlitePath: '${customDbPath}',
+          retention: { keepRawEventsDays: 42, autoRollup: false }
+        };\n`
+      );
+
+      const origCwd = process.cwd();
+      process.chdir(tempDir);
+      try {
+        const { config } = await marple.init({ trustProxy: 1 });
+        assert.strictEqual(config.sqlitePath, customDbPath, 'Should retain sqlitePath from config file');
+        assert.strictEqual(config.trustProxy, 1, 'Should include programmatic trustProxy option');
+        assert.strictEqual(config.retention?.keepRawEventsDays, 42, 'Should retain keepRawEventsDays from config file');
+      } finally {
+        process.chdir(origCwd);
+      }
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('programmatic options override file config on conflicting keys', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'marple-override-config-'));
+    const configPath = path.join(tempDir, 'marple.config.js');
+
+    try {
+      fs.writeFileSync(
+        configPath,
+        `export default {
+          storage: 'sqlite',
+          retention: { keepRawEventsDays: 42, autoRollup: false }
+        };\n`
+      );
+
+      const origCwd = process.cwd();
+      process.chdir(tempDir);
+      try {
+        const { config } = await marple.init({ retention: { keepRawEventsDays: 99 } });
+        assert.strictEqual(config.retention?.keepRawEventsDays, 99,
+          'Programmatic keepRawEventsDays must override file config value');
+      } finally {
+        process.chdir(origCwd);
+      }
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

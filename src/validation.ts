@@ -2,14 +2,14 @@ export const LIMITS = {
   EVENT_TYPE_MAX: 128,
   SESSION_ID_MAX: 128,
   USER_ID_MAX: 128,
-  URL_MAX: 2048,
-  REFERRER_MAX: 2048,
+  URL_MAX: 8192,
+  REFERRER_MAX: 8192,
   COUNTRY_MAX: 16,
   UTM_MAX: 256,
   PROP_KEY_MAX: 64,
-  PROP_VAL_STRING_MAX: 1024,
+  PROP_VAL_STRING_MAX: 4096,
   PROP_KEYS_MAX: 50,
-  PROP_DEPTH_MAX: 3,
+  PROP_DEPTH_MAX: 5,
   PROP_BYTES_MAX: 16 * 1024,
   BATCH_MAX: 50
 } as const;
@@ -27,6 +27,11 @@ export interface IngestEvent {
   utm_campaign?: string | null;
   utm_term?: string | null;
   utm_content?: string | null;
+}
+
+export interface IngestBatchResult {
+  events: IngestEvent[];
+  dropped: number;
 }
 
 export class ValidationError extends Error {
@@ -168,7 +173,7 @@ export function validateEvent(raw: unknown): IngestEvent {
   };
 }
 
-export function validateIngestBatch(payload: unknown): IngestEvent[] {
+export function validateIngestBatch(payload: unknown): IngestBatchResult {
   if (Array.isArray(payload)) {
     if (payload.length === 0) {
       throw new ValidationError('Batch payload cannot be empty', 'EMPTY_BATCH');
@@ -176,20 +181,26 @@ export function validateIngestBatch(payload: unknown): IngestEvent[] {
     if (payload.length > LIMITS.BATCH_MAX) {
       throw new ValidationError(`Batch size exceeds maximum of ${LIMITS.BATCH_MAX} events`, 'BATCH_TOO_LARGE');
     }
-    return payload.map((item, idx) => {
+    const validated: IngestEvent[] = [];
+    let firstError: ValidationError | null = null;
+    for (let idx = 0; idx < payload.length; idx++) {
       try {
-        return validateEvent(item);
+        validated.push(validateEvent(payload[idx]));
       } catch (err) {
-        if (err instanceof ValidationError) {
-          throw new ValidationError(`Batch item [${idx}] invalid: ${err.message}`, err.code);
+        if (!firstError && err instanceof ValidationError) {
+          firstError = err;
         }
-        throw err;
       }
-    });
+    }
+    if (validated.length === 0) {
+      if (firstError) throw firstError;
+      throw new ValidationError('No valid events in batch', 'INVALID_PAYLOAD');
+    }
+    return { events: validated, dropped: payload.length - validated.length };
   }
 
   if (isPlainObject(payload)) {
-    return [validateEvent(payload)];
+    return { events: [validateEvent(payload)], dropped: 0 };
   }
 
   throw new ValidationError('Payload must be a JSON event object or array of events', 'INVALID_PAYLOAD');

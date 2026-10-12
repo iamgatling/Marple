@@ -7,6 +7,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [2.4.1] - 2026-10-12
+
+### Changed
+
+- **Batch ingestion**: Invalid events in a batch are now dropped rather than rejecting the entire batch. The server returns `204` with an `X-Marple-Dropped: N` header indicating how many items were skipped. The batch is only rejected (`400`) if every event is invalid.
+- **Funnel tie-breaking**: Same-timestamp events within a session are now ordered by row insertion `id`, making funnel analysis deterministic for same-batch events.
+- **Funnel LIKE escaping**: `%` and `_` characters in pageview step values are now escaped, preventing wildcard matches against unintended URLs.
+- **Config always merged**: `marple.init()` now always loads `marple.config.js` from the working directory and merges it with programmatic options (programmatic options take precedence).
+
+### Fixed
+
+- **Client key truncation**: `sanitizeProps` in the browser client now truncates property keys to 64 characters, matching the server-side `PROP_KEY_MAX` limit.
+- **Client storage guard**: `localStorage.setItem` in `identify()` is wrapped in `try/catch` to prevent throws in private browsing and iframe contexts.
+- **Partial write resilience**: A storage error mid-batch no longer returns a misleading `400`; remaining events are still attempted and a `500` is only returned if all writes fail.
+
+### Migration Notes
+
+- Callers relying on all-or-nothing batch rejection must handle `204` + `X-Marple-Dropped` responses for mixed-validity batches going forward.
+
+---
+
 ## [2.4.0] - 2026-10-01
 
 ### Security
@@ -56,9 +77,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Migration Notes
 
+- **`autoRollup` / Data Retention Warning**: `autoRollup` is enabled by default with a 30-day raw event retention limit. On upgrade, starting Marple will immediately prune events older than 30 days unless configured with `retention: { autoRollup: false }` or a larger `keepRawEventsDays`.
 - **`trustProxy`**: Add `trustProxy: true` or a CIDR allowlist to `marple.init()` if deploying behind a reverse proxy.
 - **Country data**: New events will have `country: null` unless a trusted proxy header is present or `trustClientCountry: true` is set. Existing rows are unaffected.
-- **`autoRollup`**: Add `retention: { autoRollup: false }` if running rollups in a separate worker process.
 
 ---
 

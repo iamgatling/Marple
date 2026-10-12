@@ -370,8 +370,9 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
 
         if (step.type === 'pageview') {
           clauses.push(`${pfx}event_type = 'pageview'`);
-          clauses.push(`${pfx}url LIKE ?`);
-          params.push(`%${step.value}%`);
+          clauses.push(`${pfx}url LIKE ? ESCAPE '\\'`);
+          const escapedVal = String(step.value).replace(/([\\%_])/g, '\\$1');
+          params.push(`%${escapedVal}%`);
         } else {
           clauses.push(`${pfx}event_type = ?`);
           params.push(step.value);
@@ -380,22 +381,28 @@ export default async function openSqliteStorage(config: MarpleConfig): Promise<D
         if (i === 0) {
           cteClauses.push(`
             step_0 AS (
-              SELECT session_id, MIN(timestamp) as ts
-              FROM events
-              WHERE ${clauses.join(' AND ')}
-              GROUP BY session_id
+              SELECT session_id, timestamp as ts, id
+              FROM (
+                SELECT session_id, timestamp, id,
+                  ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp ASC, id ASC) as rn
+                FROM events
+                WHERE ${clauses.join(' AND ')}
+              ) WHERE rn = 1
             )
           `);
         } else {
           const prev = `step_${i - 1}`;
           cteClauses.push(`
             step_${i} AS (
-              SELECT e.session_id, MIN(e.timestamp) as ts
-              FROM events e
-              JOIN ${prev} ON e.session_id = ${prev}.session_id
-              WHERE e.timestamp > ${prev}.ts
-                AND ${clauses.join(' AND ')}
-              GROUP BY e.session_id
+              SELECT session_id, timestamp as ts, id
+              FROM (
+                SELECT e.session_id, e.timestamp, e.id,
+                  ROW_NUMBER() OVER (PARTITION BY e.session_id ORDER BY e.timestamp ASC, e.id ASC) as rn
+                FROM events e
+                JOIN ${prev} ON e.session_id = ${prev}.session_id
+                WHERE (e.timestamp > ${prev}.ts OR (e.timestamp = ${prev}.ts AND e.id > ${prev}.id))
+                  AND ${clauses.join(' AND ')}
+              ) WHERE rn = 1
             )
           `);
         }

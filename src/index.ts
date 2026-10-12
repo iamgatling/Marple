@@ -63,15 +63,11 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<MarpleCon
 }
 
 export async function init(options?: MarpleConfig): Promise<{ config: MarpleConfig; storage: Driver }> {
-  const hasExplicitOptions = options !== undefined && Object.keys(options).length > 0;
   if (options) {
     validateConfig(options);
   }
 
-  let fileConfig: MarpleConfig | null = null;
-  if (!hasExplicitOptions) {
-    fileConfig = await loadConfig();
-  }
+  const fileConfig = await loadConfig();
 
   const defaults: MarpleConfig = {
     storage: 'sqlite',

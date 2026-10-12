@@ -365,13 +365,16 @@ Marple is designed to comply with privacy frameworks (such as GDPR and ePrivacy)
 
 ## Migration & Upgrade Guide
 
-### Upgrading to 2.3.0+
+### Upgrading to 2.4.0+
+
+> [!CAUTION]
+> **Data Retention & Startup Rollup Warning**: Automatic rollup is enabled by default (`autoRollup: true`) with a 30-day raw event retention period (`keepRawEventsDays: 30`), even if `retention` is not explicitly configured in code. When upgrading an existing database, calling `marple.init()` will immediately prune all raw events older than 30 days. To retain all historical raw events or manage pruning manually, configure `retention: { autoRollup: false }` or increase `keepRawEventsDays` prior to launching the server.
 
 - **Dual Module Output**: Marple exports both CommonJS (`main`: `./dist/cjs/index.js`) and ESM (`module`: `./dist/index.js`) via package `exports`. `require('marple')` and `require('marple/client')` work out-of-the-box without requiring experimental Node flags.
-- **Startup Data Rollups**: If `retention` is configured, automatic rollup is enabled by default (`autoRollup: true`). During `marple.init()`, old raw events, stale sessions, and orphaned users are pruned within a single atomic transaction. Set `autoRollup: false` if you run rollups in a separate worker process.
+- **Startup Data Rollups**: Automatic rollup runs by default on server start, pruning raw events older than 30 days, stale sessions, and orphaned users within an atomic transaction. Set `retention: { autoRollup: false }` if you run rollups in a separate worker process or want to preserve all raw events.
 - **Reverse Proxy Configurations**: By default, `trustProxy` is `false`. If Marple is deployed behind a reverse proxy (e.g. Nginx, Cloudflare, AWS ALB), configure `trustProxy: true` (or an explicit IP / CIDR allowlist) in your `marple.init()` options so rate limiting and persistence resolve the genuine client IP address.
-- **Strict Funnel Analysis**: Funnel steps are evaluated in chronological order within each session. Events matching prior steps later in time will not erroneously match earlier steps. Date ranges (`since` and `until`) are validated and applied across all funnel steps.
-- **Generated Configuration Auto-Loading**: `marple.init()` automatically checks for and loads `marple.config.js` in the current working directory only when no explicit options are passed directly.
+- **Strict Funnel Analysis**: Funnel steps are evaluated in chronological order within each session, using row insertion `id` as a tie-breaker for events arriving within the same flush batch. Date ranges (`since` and `until`) are validated and applied across all funnel steps, and LIKE wildcards (`%`, `_`) in pageview steps are escaped.
+- **Configuration Auto-Loading & Merging**: `marple.init()` automatically checks for and loads `marple.config.js` from the working directory, and merges any options passed directly to `marple.init()`.
 
 ---
 

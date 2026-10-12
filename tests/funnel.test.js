@@ -131,6 +131,81 @@ describe('Chronological & Date-Bounded Funnels', () => {
         cleanupDb(dbPath);
       }
     });
+
+    test('same-batch events with identical timestamps count in sequential row id order', async () => {
+      const dbPath = createTempDbPath('funnel-same-batch');
+      try {
+        const storage = await openSqliteStorage({ sqlitePath: dbPath });
+        const batchTs = '2026-03-01T10:00:00.000Z';
+        await seedTestDb(dbPath, {
+          events: [
+            { session_id: 's_batch', event_type: 'pageview', url: 'https://example.com/', timestamp: batchTs },
+            { session_id: 's_batch', event_type: 'signup_click', timestamp: batchTs }
+          ]
+        });
+
+        const res = await storage.getFunnel([
+          { type: 'pageview', value: '/' },
+          { type: 'custom', value: 'signup_click' }
+        ]);
+
+        assert.strictEqual(res.length, 2);
+        assert.strictEqual(res[0].count, 1, 'First step (pageview) in same batch must match');
+        assert.strictEqual(res[1].count, 1, 'Second step (signup_click) in same batch must match via row id tie-breaker');
+      } finally {
+        cleanupDb(dbPath);
+      }
+    });
+
+    test('same-batch events in reversed insertion order do not count', async () => {
+      const dbPath = createTempDbPath('funnel-same-batch-reversed');
+      try {
+        const storage = await openSqliteStorage({ sqlitePath: dbPath });
+        const batchTs = '2026-03-01T10:00:00.000Z';
+        await seedTestDb(dbPath, {
+          events: [
+            { session_id: 's_batch_rev', event_type: 'signup_click', timestamp: batchTs },
+            { session_id: 's_batch_rev', event_type: 'pageview', url: 'https://example.com/', timestamp: batchTs }
+          ]
+        });
+
+        const res = await storage.getFunnel([
+          { type: 'pageview', value: '/' },
+          { type: 'custom', value: 'signup_click' }
+        ]);
+
+        assert.strictEqual(res.length, 2);
+        assert.strictEqual(res[0].count, 1);
+        assert.strictEqual(res[1].count, 0, 'Step inserted before pageview must not count even with same timestamp');
+      } finally {
+        cleanupDb(dbPath);
+      }
+    });
+
+    test('funnel pageview steps escape LIKE wildcards', async () => {
+      const dbPath = createTempDbPath('funnel-like-escape');
+      try {
+        const storage = await openSqliteStorage({ sqlitePath: dbPath });
+        await seedTestDb(dbPath, {
+          events: [
+            { session_id: 's_like_1', event_type: 'pageview', url: 'https://example.com/normal-page', timestamp: '2026-03-01T10:00:00.000Z' },
+            { session_id: 's_like_2', event_type: 'pageview', url: 'https://example.com/promo%20special', timestamp: '2026-03-01T10:01:00.000Z' }
+          ]
+        });
+
+        const resPercent = await storage.getFunnel([
+          { type: 'pageview', value: '%20' }
+        ]);
+        assert.strictEqual(resPercent[0].count, 1, 'Literal % must match only the URL containing %');
+
+        const resWildcard = await storage.getFunnel([
+          { type: 'pageview', value: '%' }
+        ]);
+        assert.strictEqual(resWildcard[0].count, 1, 'Step "%" must match only the URL containing literal %');
+      } finally {
+        cleanupDb(dbPath);
+      }
+    });
   });
 
   describe('Integration: /api/funnel HTTP Validation & Ranges', () => {
